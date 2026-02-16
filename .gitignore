@@ -19,10 +19,14 @@ env/
 
 # ========================
 # Staging / Data Folders
+# (track folders via .gitkeep, ignore contents)
 # ========================
-staging_input/
-staging_output/
-staging_not_processed/
+staging_input/*
+!staging_input/.gitkeep
+staging_output/*
+!staging_output/.gitkeep
+staging_not_processed/*
+!staging_not_processed/.gitkeep
 
 # ========================
 # OS / IDE
