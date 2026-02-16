@@ -1,0 +1,5 @@
+monai
+pydicom
+easyocr
+pillow
+pyyaml

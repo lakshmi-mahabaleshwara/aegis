@@ -1,0 +1,50 @@
+paths:
+  input_dir: 'staging_input'
+  output_dir: 'staging_output'
+
+ocr:
+  decoder: 'beamsearch'
+  beam_width: 5
+  confidence_threshold: 0.4
+  languages: ['en']
+  gpu_usage: false
+
+safelist:
+  # Basic anatomical markers
+  - '^m$'
+  - '^R$'
+  - '^L$'
+  - '^B$'  # B-mode ultrasound
+  
+  # Ultrasound technical parameters (preserve clinical data)
+  - '^F\s*H?\d+\.?\d*$'  # Frequency: F H5.0, FH5.0, F 5.0
+  - '^D\s*\d+\.?\d*$'    # Depth: D 13.0, D13.0
+  - '^G\s*\d+$'          # Gain: G 25, G25
+  - '^6\s*\d+$'          # Gain OCR error: 6 25 (G misread as 6)
+  - '^FR\s*\d+$'         # Frame Rate: FR 25, FR25
+  - '^DR\s*\d+$'         # Dynamic Range: DR 130, DR130
+  - '^Z\s*\d+\.\d+$'     # Z parameter: Z 1.10, Z1.10
+  - '^\d+\.\d+$'         # Standalone decimals: 1.10, 21.10 (for misread Z params)
+  - '^AP\s+\d+\.\d+%'    # Acoustic Power: AP 81.28%
+  - '^MI\s+\d+\.\d+'     # Mechanical Index: MI 1.14
+  - '^TIS\s+\d+\.\d+'    # Thermal Index: TIS 0.3
+  - '^SSI\s+\d+$'        # SSI parameter: SSI 1540
+  
+  # Ultrasound modes and settings
+  - '^iClear\s+\d+$'     # Image enhancement: iClear 5
+  - '^iBeam\s+\d+$'      # Beam forming: iBeam 2
+  
+  # Measurement markers (cm, mm, etc.)
+  - '\d+\.?\d*\s*(cm|mm|MHz)$'
+  
+  # Generic medical terms (case-insensitive)
+  - '(?i)patient'
+  - '(?i)hospital'
+
+pii_mapping:
+  '(0010, 0010)': 'DUMMY'  # PatientName
+  '(0010, 0020)': 'DUMMY'  # PatientID
+  '(0008, 0020)': 'ZERO'   # StudyDate
+  '(0008, 0050)': 'REMOVE' # AccessionNumber
+  '(0008, 0090)': 'REMOVE' # ReferringPhysicianName
+  '(0008, 0080)': 'REMOVE' # InstitutionName

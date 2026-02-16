@@ -1,0 +1,46 @@
+# ========================
+# Python
+# ========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# ========================
+# Virtual Environment
+# ========================
+venv/
+.venv/
+env/
+
+# ========================
+# Staging / Data Folders
+# ========================
+staging_input/
+staging_output/
+staging_not_processed/
+
+# ========================
+# OS / IDE
+# ========================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ========================
+# EasyOCR Model Cache
+# ========================
+.EasyOCR/
+
+# ========================
+# Miscellaneous
+# ========================
+*.log
+.env
