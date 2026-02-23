@@ -13,6 +13,7 @@ MONAI Aegis is a production-ready pipeline for de-identifying medical images (DI
 - **Thread-safe** OCR via `threading.local()` — safe for `DataLoader(num_workers > 0)`
 - **Safelist support** for preserving clinical markers (ultrasound parameters, measurements)
 - **Low-confidence routing** — images with uncertain OCR are flagged for manual review
+- **InvertibleTransform** — redaction mask tracked through MONAI's transform history for spatial consistency
 
 ### Metadata De-identification (DICOM)
 - **Configurable PII mapping** with REMOVE / DUMMY / ZERO actions
@@ -22,6 +23,8 @@ MONAI Aegis is a production-ready pipeline for de-identifying medical images (DI
 
 ### Pipeline Architecture
 - **MONAI-compliant transforms** — array + dictionary variants, `MetaTensor` propagation
+- **Invertible redaction** — `RedactPixelPHId` inherits from `InvertibleTransform`, enabling spatial tracking of redacted regions through downstream transforms
+- **Safety lock** — warns when prior spatial transforms may compromise OCR accuracy
 - **Thread-safe by design** — only `SaveDicomd` (file I/O) is `ThreadUnsafe`
 - **Four-step pipeline**: Load → Redact → Scrub → Save
 - **Non-destructive** — input files remain unchanged
@@ -123,7 +126,7 @@ PYTHONPATH=monai_aegis python -m unittest discover tests/integration -v
 ### Test Coverage
 | Transform | Tests |
 |-----------|-------|
-| `RedactPixelPHI` / `RedactPixelPHId` | Visual redaction, safelist, shape preservation |
+| `RedactPixelPHI` / `RedactPixelPHId` | Visual redaction, safelist, shape preservation, invertibility (`push_transform`, `inverse` cleanup), spatial transform safety warning |
 | `ScrubDicomMetadata` / `ScrubDicomMetadatad` | Tag scrubbing, no-I/O assertion, orientation |
 | `LoadDicomRawd` | DICOM and JPEG loading |
 | `detect_text` / `apply_redaction` | OCR detection, confidence filtering, redaction |
@@ -167,7 +170,7 @@ aegis/
 ### Detailed Processing Steps
 
 1. **Load (`LoadDicomRawd`)**: Reads various medical image formats (DICOM, JPEG, PNG) into a MONAI `MetaTensor` without mutating the original files. This avoids affine transforms that can rotate burned-in text away from OCR detection.
-2. **Redact (`RedactPixelPHId`)**: A visual de-identification step that uses EasyOCR to detect text. It respects a safelist (regex-based) to ignore valid clinical markers and applies black-box redaction to other text. Images falling below the configured confidence threshold bypass further processing and are routed to `staging_not_processed/` for manual review.
+2. **Redact (`RedactPixelPHId`)**: An `InvertibleTransform` that uses EasyOCR to detect text. It respects a safelist (regex-based) to ignore valid clinical markers and applies black-box redaction to other text. A binary **redaction mask** (matched to the MetaTensor's `spatial_shape`) is generated and tracked via MONAI's `push_transform()`, enabling downstream spatial transforms to resample the mask consistently. Images falling below the configured confidence threshold bypass further processing and are routed to `staging_not_processed/` for manual review. A **safety lock** logs a warning if prior spatial transforms are detected on the input, alerting that OCR accuracy may be compromised.
 3. **Scrub (`ScrubDicomMetadatad`)**: A pure in-memory metadata scrubber (primarily for DICOMs). It calls `AegisIdentityManager` to perform deterministic tokenization, dummy replacement, or removal of designated DICOM tags as defined in the configuration.
 4. **Save (`SaveDicomd`)**: Writes the final, de-identified datasets back to disk from memory.
 
@@ -191,7 +194,10 @@ classDiagram
 
     class RedactPixelPHId {
         +__call__(data)
+        +inverse(data)
+        +push_transform()
         -transform: RedactPixelPHI
+        <<InvertibleTransform>>
     }
 
     class RedactPixelPHI {
@@ -215,6 +221,8 @@ classDiagram
     RunPipeline --> RedactPixelPHI : reads stats
 
     RedactPixelPHId *-- RedactPixelPHI
+    RedactPixelPHId --|> MapTransform
+    RedactPixelPHId --|> InvertibleTransform
     ScrubDicomMetadatad *-- ScrubDicomMetadata
 ```
 
@@ -224,12 +232,12 @@ The pipeline is intentionally designed around multithreading bottlenecks and fil
 * **Thread-Local Isolation**: To prevent locking issues and race conditions with stateful AI models, `RedactPixelPHId` utilizes Python's `threading.local()`. This guarantees every worker thread spins up its own isolated EasyOCR reader instance.
 * **I/O Isolation for Safety**: The pipeline intentionally marks **Step 4 (`SaveDicomd`)** as `ThreadUnsafe`. MONAI detects this and routes all dataset saving sequential actions to the main thread. This prevents file locking contentions, HDD thrashing, and ensures files uniquely derived from their source are written securely without race conditions.
 
-| Transform | Strategy | `num_workers > 0` |
-|-----------|----------|-------------------|
-| `LoadDicomRawd` | Stateless | ✅ Safe |
-| `RedactPixelPHId` | `threading.local()` for EasyOCR | ✅ Safe |
-| `ScrubDicomMetadatad` | Pure in-memory, no I/O | ✅ Safe |
-| `SaveDicomd` | `ThreadUnsafe` mixin | ⚠️ Main thread sequential write |
+| Transform | Strategy | Invertible | `num_workers > 0` |
+|-----------|----------|------------|-------------------|
+| `LoadDicomRawd` | Stateless | — | ✅ Safe |
+| `RedactPixelPHId` | `threading.local()` for EasyOCR | ✅ `InvertibleTransform` | ✅ Safe |
+| `ScrubDicomMetadatad` | Pure in-memory, no I/O | — | ✅ Safe |
+| `SaveDicomd` | `ThreadUnsafe` mixin | — | ⚠️ Main thread sequential write |
 
 ---
 

@@ -13,7 +13,7 @@ import easyocr
 import logging
 import torch
 from typing import Dict, Hashable, Mapping, Any, List, Optional
-from monai.transforms import Transform, MapTransform
+from monai.transforms import Transform, MapTransform, InvertibleTransform
 from monai.data import MetaTensor
 
 logger = logging.getLogger(__name__)
@@ -198,16 +198,24 @@ class RedactPixelPHI(Transform):
 
 
 # ---------------------------------------------------------------------------
-# Dictionary Transform
+# Dictionary Transform (InvertibleTransform)
 # ---------------------------------------------------------------------------
 
-class RedactPixelPHId(MapTransform):
+class RedactPixelPHId(MapTransform, InvertibleTransform):
     """
     Dictionary transform: Detect and redact burned-in PHI text from medical images.
 
     Dictionary-based wrapper of :py:class:`RedactPixelPHI`.
+    Inherits from ``InvertibleTransform`` (which extends ``MapTransform``),
+    enabling the MONAI ecosystem to track redacted regions through downstream
+    spatial transforms (e.g., ``Spacingd``).
+
     Thread-safe via per-thread EasyOCR reader (``threading.local()``).
     Preserves MetaTensor metadata throughout the transform.
+
+    The ``inverse()`` method cannot restore original pixel values (they are
+    permanently zeroed), but it cleans up the redaction mask and stats from
+    the data dictionary and pops the transform history entry.
 
     Args:
         keys: Keys of the data dictionary to process.
@@ -229,6 +237,15 @@ class RedactPixelPHId(MapTransform):
         for key in self.key_iterator(d):
             input_tensor = d[key]
 
+            # Safety lock: warn if prior spatial transforms detected
+            if isinstance(input_tensor, MetaTensor):
+                applied_ops = input_tensor.applied_operations if hasattr(input_tensor, 'applied_operations') else []
+                if len(applied_ops) > 0:
+                    logger.warning(
+                        "Aegis detected prior spatial transforms; "
+                        "OCR accuracy may be compromised."
+                    )
+
             # Extract numpy from MetaTensor/Tensor
             if hasattr(input_tensor, 'detach'):
                 pixel_array = input_tensor.detach().cpu().numpy()
@@ -239,12 +256,49 @@ class RedactPixelPHId(MapTransform):
             redacted = self.transform(pixel_array)
 
             # Store redaction stats for downstream routing
-            d[f"{key}_redaction_stats"] = getattr(self.transform, 'last_stats', {})
+            stats = getattr(self.transform, 'last_stats', {})
+            d[f"{key}_redaction_stats"] = stats
+
+            # Generate binary redaction mask matched to spatial_shape
+            # Mask is 1 where pixels were zeroed (redacted), 0 elsewhere
+            spatial_shape = pixel_array.shape[1:]  # (H, W) from (C, H, W)
+            redaction_mask = np.zeros(spatial_shape, dtype=np.uint8)
+            bboxes = getattr(self.transform, 'last_stats', {}).get('_bboxes', [])
+
+            # Recompute mask from the difference between original and redacted
+            if pixel_array.ndim == 3:
+                diff = np.any(pixel_array != redacted, axis=0)
+            else:
+                diff = pixel_array != redacted
+            redaction_mask = diff.astype(np.uint8)
+            d[f"{key}_redaction_mask"] = redaction_mask
 
             # Preserve MetaTensor
             if isinstance(input_tensor, MetaTensor):
                 d[key] = MetaTensor(torch.as_tensor(redacted), meta=input_tensor.meta)
             else:
                 d[key] = redacted
+
+            # Push transform info for MONAI invertibility tracking
+            self.push_transform(
+                d,
+                key,
+                extra_info={
+                    'redaction_stats': stats,
+                    'redaction_mask_shape': list(redaction_mask.shape),
+                }
+            )
+
+        return d
+
+    def inverse(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
+        d = dict(data)
+        for key in self.key_iterator(d):
+            # Pop the transform history entry
+            self.pop_transform(d, key)
+
+            # Clean up side-keys added by __call__
+            d.pop(f"{key}_redaction_mask", None)
+            d.pop(f"{key}_redaction_stats", None)
 
         return d
