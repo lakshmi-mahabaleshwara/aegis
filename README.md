@@ -160,34 +160,31 @@ aegis/
 
 ## 🔧 Architecture
 
-### Pipeline Flow
+### Architecture Diagram
 
-```
-Input File (.dcm / .jpg / .png)
-    │
-    ▼
-LoadDicomRawd           ← Thread-safe: raw DICOM/image → MetaTensor
-    │
-    ▼
-RedactPixelPHId         ← Thread-safe: EasyOCR + safelist → redacted pixels
-    │
-    ▼
-ScrubDicomMetadatad     ← Thread-safe: in-memory metadata scrub (DICOM only)
-    │
-    ▼
-SaveDicomd              ← ThreadUnsafe: write scrubbed DICOM to disk
-    │
-    ▼
-Output File (de-identified)
-```
+![Aegis Transform Pipeline Architecture](architecture.png)
 
-### Thread Safety Model
+### Detailed Processing Steps
+
+1. **Load (`LoadDicomRawd`)**: Reads various medical image formats (DICOM, JPEG, PNG) into a MONAI `MetaTensor` without mutating the original files. This avoids affine transforms that can rotate burned-in text away from OCR detection.
+2. **Redact (`RedactPixelPHId`)**: A visual de-identification step that uses EasyOCR to detect text. It respects a safelist (regex-based) to ignore valid clinical markers and applies black-box redaction to other text. Images falling below the configured confidence threshold bypass further processing and are routed to `staging_not_processed/` for manual review.
+3. **Scrub (`ScrubDicomMetadatad`)**: A pure in-memory metadata scrubber (primarily for DICOMs). It calls `AegisIdentityManager` to perform deterministic tokenization, dummy replacement, or removal of designated DICOM tags as defined in the configuration.
+4. **Save (`SaveDicomd`)**: Writes the final, de-identified datasets back to disk from memory.
+
+### Component Interaction & Thread Safety Model
+
+The pipeline is intentionally designed around multithreading bottlenecks and file I/O safety when operating within a PyTorch `DataLoader(num_workers > 0)`.
+
+* **Concurrent Processing**: Steps 1–3 (`Load`, `Redact`, `Scrub`) are entirely thread-safe and operate purely in-memory. By pushing the heavy OCR computation to parallel background workers, the pipeline scales across CPU cores.
+* **Thread-Local Isolation**: To prevent locking issues and race conditions with stateful AI models, `RedactPixelPHId` utilizes Python's `threading.local()`. This guarantees every worker thread spins up its own isolated EasyOCR reader instance.
+* **I/O Isolation for Safety**: The pipeline intentionally marks **Step 4 (`SaveDicomd`)** as `ThreadUnsafe`. MONAI detects this and routes all dataset saving sequential actions to the main thread. This prevents file locking contentions, HDD thrashing, and ensures files uniquely derived from their source are written securely without race conditions.
+
 | Transform | Strategy | `num_workers > 0` |
 |-----------|----------|-------------------|
 | `LoadDicomRawd` | Stateless | ✅ Safe |
 | `RedactPixelPHId` | `threading.local()` for EasyOCR | ✅ Safe |
 | `ScrubDicomMetadatad` | Pure in-memory, no I/O | ✅ Safe |
-| `SaveDicomd` | `ThreadUnsafe` mixin | ⚠️ Single-worker |
+| `SaveDicomd` | `ThreadUnsafe` mixin | ⚠️ Main thread sequential write |
 
 ---
 
