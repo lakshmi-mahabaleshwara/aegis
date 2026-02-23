@@ -173,6 +173,51 @@ aegis/
 
 ### Component Interaction & Thread Safety Model
 
+```mermaid
+classDiagram
+    class RunPipeline {
+        +run_pipeline(config_path)
+        -check_confidence(stats)
+        -route_file()
+    }
+
+    class PipelineBuilder {
+        +build_pipeline(config, output_dir)
+    }
+
+    class Transforms {
+        <<Module>>
+    }
+
+    class RedactPixelPHId {
+        +__call__(data)
+        -transform: RedactPixelPHI
+    }
+
+    class RedactPixelPHI {
+        +reader (thread_local)
+        +detect_text()
+        +apply_redaction()
+    }
+
+    class ScrubDicomMetadatad {
+        +__call__(data)
+        -transform: ScrubDicomMetadata
+    }
+
+    class SaveDicomd {
+        +__call__(data)
+        <<ThreadUnsafe>>
+    }
+
+    RunPipeline --> PipelineBuilder
+    PipelineBuilder ..> Transforms
+    RunPipeline --> RedactPixelPHI : reads stats
+
+    RedactPixelPHId *-- RedactPixelPHI
+    ScrubDicomMetadatad *-- ScrubDicomMetadata
+```
+
 The pipeline is intentionally designed around multithreading bottlenecks and file I/O safety when operating within a PyTorch `DataLoader(num_workers > 0)`.
 
 * **Concurrent Processing**: Steps 1–3 (`Load`, `Redact`, `Scrub`) are entirely thread-safe and operate purely in-memory. By pushing the heavy OCR computation to parallel background workers, the pipeline scales across CPU cores.
