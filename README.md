@@ -200,12 +200,85 @@ aegis/
 
 ### Architecture Diagram
 
-![Aegis Transform Pipeline Architecture](architecture.png)
+```mermaid
+flowchart TD
+    classDef input fill:#e1fcff,stroke:#01579b,stroke-width:2px,color:#000;
+    classDef process fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000;
+    classDef subProcess fill:#f3e5f5,stroke:#7b1fa2,stroke-width:1px,stroke-dasharray: 5 5,color:#000;
+    classDef output fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000;
+    classDef config fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000;
+    classDef decision fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#000;
+
+    subgraph Inputs ["Inputs"]
+        dicom["DICOM Files (.dcm)"]:::input
+        img["Image Files (.jpg, .png)"]:::input
+    end
+
+    config["config.yaml\n(OCR, NER, PII Mapping)"]:::config
+
+    subgraph Pipeline ["Aegis Transform Pipeline"]
+        load["1. LoadDicomRawd\n(Raw File → MetaTensor)\n<i>Thread-safe</i>"]:::process
+        
+        subgraph step2 ["2. RedactPixelPHId <i>(Thread-safe via threading.local)</i>"]
+            ocr["EasyOCR Engine\n(Text Detection)"]:::subProcess
+            
+            subgraph NER ["PHIClassifier (3-Layer Pipeline)"]
+                direction TB
+                L1{"1. Clinical\nAllowlist / Patterns?"}:::decision
+                L2{"2. Heuristic\nPHI Patterns?"}:::decision
+                L3["3. Stanford NER\nModel"]:::subProcess
+            end
+            
+            action_redact["Apply Black-Box\nRedaction Mask"]:::process
+        end
+
+        scrub["3. ScrubDicomMetadatad\n(In-memory DICOM Metadata Scrubbing)\n<i>Thread-safe</i>"]:::process
+        id_manager["AegisIdentityManager\n(Deterministic Tokenization / Hashing)"]:::subProcess
+        
+        save["4. SaveDicomd\n(Write to Disk)\n<i>ThreadUnsafe</i>"]:::process
+    end
+
+    subgraph Outputs ["Outputs"]
+        out_not_proc["staging_not_processed/\n(Low-confidence / Manual Review)"]:::output
+        out_proc["staging_output/\n(De-identified Files)"]:::output
+    end
+
+    %% Connections
+    config -. "Configures" .-> Pipeline
+    
+    dicom -- "staging_input/" --> load
+    img -- "staging_input/" --> load
+    
+    load --> ocr
+    
+    ocr -- "Confidence < Threshold" --> out_not_proc
+    ocr -- "Confidence ≥ Threshold" --> L1
+    
+    L1 -- "Yes (Preserve)" --> scrub
+    L1 -- "No" --> L2
+    
+    L2 -- "Yes" --> action_redact
+    L2 -- "No" --> L3
+    
+    L3 -- "Classified as PHI" --> action_redact
+    L3 -- "Classified as Clinical" --> scrub
+    
+    action_redact --> scrub
+    
+    scrub <--> |"Tokenize/Hash Patient PII"| id_manager
+    scrub --> save
+    save --> out_proc
+```
 
 ### Detailed Processing Steps
 
 1. **Load (`LoadDicomRawd`)**: Reads various medical image formats (DICOM, JPEG, PNG) into a MONAI `MetaTensor` without mutating the original files. This avoids affine transforms that can rotate burned-in text away from OCR detection.
-2. **Redact (`RedactPixelPHId`)**: An `InvertibleTransform` that uses EasyOCR to detect text, then classifies each detection through a **3-layer pipeline**: (1) clinical allowlist preserves known device/parameter terms, (2) PHI heuristic patterns catch date-IDs and institution names, (3) the `stanford-deidentifier-base` NER model provides semantic classification for remaining text. A binary **redaction mask** (matched to the MetaTensor's `spatial_shape`) is generated and tracked via MONAI's `push_transform()`. Images with low OCR confidence are routed to `staging_not_processed/` for manual review. A **safety lock** warns if prior spatial transforms may compromise OCR accuracy. When `ner.enabled: false`, the system falls back to regex safelist matching.
+2. **Redact (`RedactPixelPHId`)**: An `InvertibleTransform` that uses EasyOCR to detect text, then classifies each detection through a **3-layer pipeline**:
+   * **(1) Clinical allowlist**: preserves known device/parameter terms.
+   * **(2) PHI heuristics**: catch obvious date-IDs and institution names.
+   * **(3) Stanford NER**: the `stanford-deidentifier-base` model provides semantic classification for remaining text.
+   
+   A binary **redaction mask** (matched to the MetaTensor's `spatial_shape`) is generated from PHI detections and tracked via MONAI's `push_transform()`. Images with low OCR confidence bypass this step and are routed to `staging_not_processed/` for manual review. A **safety lock** warns if prior spatial transforms may compromise OCR accuracy. When `ner.enabled: false`, the system falls back to regex safelist matching.
 3. **Scrub (`ScrubDicomMetadatad`)**: A pure in-memory metadata scrubber (primarily for DICOMs). It calls `AegisIdentityManager` to perform deterministic tokenization, dummy replacement, or removal of designated DICOM tags as defined in the configuration.
 4. **Save (`SaveDicomd`)**: Writes the final, de-identified datasets back to disk from memory.
 
