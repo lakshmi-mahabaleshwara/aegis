@@ -2,9 +2,11 @@
 MONAI Aegis Pixel Transforms — RedactPixelPHI / RedactPixelPHId
 
 OCR-based visual PHI detection and redaction for medical images.
-Uses EasyOCR with configurable safelist to preserve clinical markers.
+Uses EasyOCR for text detection with two classification modes:
+  1. Stanford NER (default) — semantic PHI classification via transformer model
+  2. Regex Safelist (fallback) — pattern-based clinical marker preservation
 
-Thread-safe: uses threading.local() for per-thread EasyOCR reader instances.
+Thread-safe: uses threading.local() for per-thread EasyOCR and NER instances.
 """
 import re
 import threading
@@ -26,16 +28,22 @@ logger = logging.getLogger(__name__)
 def detect_text(
     pixel_array: np.ndarray,
     ocr_reader: easyocr.Reader,
-    config: Dict[str, Any]
+    config: Dict[str, Any],
+    ner_classifier=None
 ) -> tuple:
     """
-    Detects text in an image and returns bounding boxes for redaction,
-    respecting the safelist of clinical markers.
+    Detects text in an image and returns bounding boxes for redaction.
+
+    Uses one of two classification strategies:
+      - **NER mode** (when ``ner_classifier`` is provided): sends OCR text to
+        the Stanford de-identifier NER model for semantic PHI classification.
+      - **Safelist mode** (fallback): checks text against regex patterns from config.
 
     Args:
         pixel_array: Image data as numpy array (uint8 preferred).
         ocr_reader: Initialized EasyOCR Reader instance.
         config: Configuration dict with 'ocr' and 'safelist' sections.
+        ner_classifier: Optional PHIClassifier instance for NER-based detection.
 
     Returns:
         Tuple of (bboxes, stats) where stats is a dict with detection metrics.
@@ -45,17 +53,14 @@ def detect_text(
         'total_detections': 0,
         'low_confidence_count': 0,
         'safelisted_count': 0,
+        'ner_classified_count': 0,
         'redacted_count': 0,
     }
     ocr_settings = config.get('ocr', {})
-    safelist_patterns = config.get('safelist', [])
 
     decoder = ocr_settings.get('decoder', 'beamsearch')
     beam_width = ocr_settings.get('beam_width', 5)
     confidence_threshold = ocr_settings.get('confidence_threshold', 0.4)
-
-    # Compile regex patterns
-    compiled_patterns = [re.compile(p) for p in safelist_patterns]
 
     try:
         results = ocr_reader.readtext(
@@ -66,19 +71,38 @@ def detect_text(
 
         stats['total_detections'] = len(results)
 
+        # Separate low-confidence detections first
+        confident_results = []
         for (bbox, text, prob) in results:
             if prob < confidence_threshold:
                 stats['low_confidence_count'] += 1
-                continue
-
-            # Check Safelist: skip clinical markers
-            is_safe = any(pattern.search(text) for pattern in compiled_patterns)
-
-            if is_safe:
-                stats['safelisted_count'] += 1
             else:
-                bboxes.append(bbox)
-                stats['redacted_count'] += 1
+                confident_results.append((bbox, text, prob))
+
+        if ner_classifier is not None:
+            # --- NER Mode: semantic PHI classification ---
+            texts = [text for (_, text, _) in confident_results]
+            if texts:
+                phi_flags = ner_classifier.classify_texts(texts)
+                for (bbox, text, prob), is_phi in zip(confident_results, phi_flags):
+                    stats['ner_classified_count'] += 1
+                    if is_phi:
+                        bboxes.append(bbox)
+                        stats['redacted_count'] += 1
+                    else:
+                        stats['safelisted_count'] += 1
+        else:
+            # --- Safelist Mode: regex-based clinical marker preservation ---
+            safelist_patterns = config.get('safelist', [])
+            compiled_patterns = [re.compile(p) for p in safelist_patterns]
+
+            for (bbox, text, prob) in confident_results:
+                is_safe = any(pattern.search(text) for pattern in compiled_patterns)
+                if is_safe:
+                    stats['safelisted_count'] += 1
+                else:
+                    bboxes.append(bbox)
+                    stats['redacted_count'] += 1
 
     except Exception as e:
         logger.error(f"Error in detect_text: {e}")
@@ -123,15 +147,17 @@ class RedactPixelPHI(Transform):
     """
     Array transform: Detect and redact burned-in PHI text from a medical image.
 
-    Uses EasyOCR to detect text, checks against a safelist of clinical markers,
-    and applies black-box redaction to non-safe text regions.
+    Uses EasyOCR to detect text, then classifies each detection using either:
+      - **Stanford NER model** (when ``ner.enabled: true`` in config) for
+        semantic, context-aware PHI detection.
+      - **Regex safelist** (fallback) for pattern-based clinical marker preservation.
 
     Thread-safe: uses ``threading.local()`` so each worker thread gets its
-    own EasyOCR reader instance (the model is loaded lazily on first use).
+    own EasyOCR reader and NER classifier instances (loaded lazily on first use).
     This enables safe use with ``DataLoader(num_workers > 0)``.
 
     Args:
-        config: Configuration dict with 'ocr' and 'safelist' sections.
+        config: Configuration dict with 'ocr', 'ner', and 'safelist' sections.
 
     Example::
 
@@ -143,6 +169,7 @@ class RedactPixelPHI(Transform):
         super().__init__()
         self.config = config
         self._thread_local = threading.local()
+        self._ner_enabled = config.get('ner', {}).get('enabled', False)
 
     @property
     def reader(self) -> easyocr.Reader:
@@ -153,6 +180,18 @@ class RedactPixelPHI(Transform):
                 gpu=self.config['ocr'].get('gpu_usage', False)
             )
         return self._thread_local.reader
+
+    @property
+    def ner_classifier(self):
+        """Lazily create a per-thread NER classifier (if NER is enabled)."""
+        if not self._ner_enabled:
+            return None
+        if not hasattr(self._thread_local, 'ner_classifier'):
+            from transforms.ner_classifier import PHIClassifier
+            self._thread_local.ner_classifier = PHIClassifier(self.config)
+            logger.info("NER classifier initialized for thread: %s",
+                        threading.current_thread().name)
+        return self._thread_local.ner_classifier
 
     def __call__(self, image: np.ndarray) -> np.ndarray:
         """
@@ -184,8 +223,10 @@ class RedactPixelPHI(Transform):
         else:
             norm_ocr = pixel_array
 
-        # Detect and Redact
-        bboxes, self.last_stats = detect_text(norm_ocr, self.reader, self.config)
+        # Detect and Redact (with NER if enabled)
+        bboxes, self.last_stats = detect_text(
+            norm_ocr, self.reader, self.config, self.ner_classifier
+        )
         redacted = apply_redaction(pixel_array, bboxes)
 
         # Restore channel-first

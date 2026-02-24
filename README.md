@@ -9,11 +9,14 @@ MONAI Aegis is a production-ready pipeline for de-identifying medical images (DI
 ## 🌟 Features
 
 ### Visual De-identification (Pixel Redaction)
+- **Stanford NER-based PHI detection** — semantic classification via `stanford-deidentifier-base` (F1 ≥ 97.9%)
+- **3-layer classification pipeline**: clinical allowlist → PHI heuristics → NER model
 - **EasyOCR-based text detection** with configurable confidence thresholds
-- **Thread-safe** OCR via `threading.local()` — safe for `DataLoader(num_workers > 0)`
-- **Safelist support** for preserving clinical markers (ultrasound parameters, measurements)
+- **Thread-safe** OCR + NER via `threading.local()` — safe for `DataLoader(num_workers > 0)`
+- **Regex safelist fallback** — preserved for environments without NER model
 - **Low-confidence routing** — images with uncertain OCR are flagged for manual review
 - **InvertibleTransform** — redaction mask tracked through MONAI's transform history for spatial consistency
+- **Fully configurable** — PHI labels, clinical allowlist, clinical patterns, and PHI heuristics all defined in `config.yaml`
 
 ### Metadata De-identification (DICOM)
 - **Configurable PII mapping** with REMOVE / DUMMY / ZERO actions
@@ -91,11 +94,30 @@ ocr:
   gpu_usage: false
   confidence_threshold: 0.4
 
-safelist:
-  - '^B$'                        # B-mode indicator
-  - '^FH?\s*\d+\.?\d*$'         # Frequency: FH5.0
-  - '^D\s*\d+\.?\d*$'           # Depth: D 13.0
-  - '\d+\.?\d*\s*(cm|mm|MHz)$'  # Measurements: 2.35 cm
+ner:
+  enabled: true                   # Set false to fall back to regex safelist
+  model_name: 'StanfordAIMI/stanford-deidentifier-base'
+  device: 'cpu'                   # 'cpu', 'cuda', or 'mps'
+  phi_labels:                     # NER entity types treated as PHI
+    - PATIENT
+    - DOCTOR
+    - HOSPITAL
+    - DATE
+    - IDNUM
+    # ... (22 labels total)
+  clinical_allowlist:             # Terms never redacted
+    - mindray
+    - ge
+    - adult abd n
+    # ... (device manufacturers, imaging modes)
+  clinical_patterns:              # Regex for clinical/technical text (preserved)
+    - '^(F\s*H?\d|D\s+\d|G\s+\d|FR\s+\d|DR\s+\d)'
+    - '^(AP|MI|TIS|SSI)\s+\d'
+    # ... (probe IDs, measurements, exam types)
+  phi_heuristic_patterns:         # Regex for PHI in short OCR fragments (redacted)
+    - '^\d{8}[-/]\d{6}[-/]?\w*$'  # Date-ID combos
+    - '(?i)(hospital|clinic|diagnostic|medical)'
+    # ... (dates, doctor names, patient IDs)
 
 pii_mapping:
   '(0010, 0010)': 'DUMMY'   # PatientName → TOKEN_xxxxx
@@ -103,6 +125,17 @@ pii_mapping:
   '(0008, 0020)': 'ZERO'    # StudyDate → 00000000
   '(0008, 0050)': 'REMOVE'  # AccessionNumber → removed
 ```
+
+### NER Classification Pipeline
+
+When `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline:
+
+| Layer | Source | Action | Example |
+|-------|--------|--------|---------|
+| 1. Clinical allowlist | `ner.clinical_allowlist` | **Preserve** | `mindray`, `adult abd n` |
+| 2. Clinical patterns | `ner.clinical_patterns` | **Preserve** | `FH5.0`, `D 13.0`, `SC5-1N` |
+| 3. PHI heuristics | `ner.phi_heuristic_patterns` | **Redact** | `SKANDA DIAGNOSTIC CENTRE`, `20260117-091825-6AAA` |
+| 4. Stanford NER | `ner.phi_labels` | **Redact if PHI** | Names, remaining identifiers |
 
 ### PII Mapping Actions
 | Action | Behavior | Example |
@@ -116,7 +149,7 @@ pii_mapping:
 ## 🧪 Testing
 
 ```bash
-# Run all 18 unit tests
+# Run all 30 unit tests
 PYTHONPATH=monai_aegis python -m unittest discover tests/unit -v
 
 # Run integration tests
@@ -126,10 +159,11 @@ PYTHONPATH=monai_aegis python -m unittest discover tests/integration -v
 ### Test Coverage
 | Transform | Tests |
 |-----------|-------|
-| `RedactPixelPHI` / `RedactPixelPHId` | Visual redaction, safelist, shape preservation, invertibility (`push_transform`, `inverse` cleanup), spatial transform safety warning |
+| `RedactPixelPHI` / `RedactPixelPHId` | Visual redaction, safelist, shape preservation, invertibility, spatial transform safety warning |
+| `PHIClassifier` | PHI detection, clinical preservation, empty text, mixed inputs, config loading, error defaults |
+| `detect_text` / `apply_redaction` | OCR detection, confidence filtering, redaction, NER integration, safelist fallback |
 | `ScrubDicomMetadata` / `ScrubDicomMetadatad` | Tag scrubbing, no-I/O assertion, orientation |
 | `LoadDicomRawd` | DICOM and JPEG loading |
-| `detect_text` / `apply_redaction` | OCR detection, confidence filtering, redaction |
 
 ---
 
@@ -140,16 +174,17 @@ aegis/
 ├── monai_aegis/                      # Installable package
 │   ├── pyproject.toml                # PEP 621 package config
 │   ├── config/
-│   │   └── config.yaml               # De-identification settings
+│   │   └── config.yaml               # De-identification + NER settings
 │   └── transforms/
 │       ├── __init__.py                # Public API exports
 │       ├── io.py                      # LoadDicomRaw/d, SaveDicom/d
-│       ├── pixel.py                   # RedactPixelPHI/d (thread-safe OCR)
+│       ├── pixel.py                   # RedactPixelPHI/d (thread-safe OCR + NER)
+│       ├── ner_classifier.py          # PHIClassifier (Stanford NER wrapper)
 │       ├── metadata.py                # ScrubDicomMetadata/d (pure in-memory)
 │       ├── utility.py                 # AegisIdentityManager (tokenization)
 │       └── pipeline.py                # build_pipeline() composer
 ├── tests/
-│   ├── unit/                          # 18 unit tests
+│   ├── unit/                          # 30 unit tests
 │   └── integration/                   # End-to-end tests
 ├── run_pipeline.py                    # CLI entry point
 ├── Dockerfile                         # Container build
@@ -170,7 +205,7 @@ aegis/
 ### Detailed Processing Steps
 
 1. **Load (`LoadDicomRawd`)**: Reads various medical image formats (DICOM, JPEG, PNG) into a MONAI `MetaTensor` without mutating the original files. This avoids affine transforms that can rotate burned-in text away from OCR detection.
-2. **Redact (`RedactPixelPHId`)**: An `InvertibleTransform` that uses EasyOCR to detect text. It respects a safelist (regex-based) to ignore valid clinical markers and applies black-box redaction to other text. A binary **redaction mask** (matched to the MetaTensor's `spatial_shape`) is generated and tracked via MONAI's `push_transform()`, enabling downstream spatial transforms to resample the mask consistently. Images falling below the configured confidence threshold bypass further processing and are routed to `staging_not_processed/` for manual review. A **safety lock** logs a warning if prior spatial transforms are detected on the input, alerting that OCR accuracy may be compromised.
+2. **Redact (`RedactPixelPHId`)**: An `InvertibleTransform` that uses EasyOCR to detect text, then classifies each detection through a **3-layer pipeline**: (1) clinical allowlist preserves known device/parameter terms, (2) PHI heuristic patterns catch date-IDs and institution names, (3) the `stanford-deidentifier-base` NER model provides semantic classification for remaining text. A binary **redaction mask** (matched to the MetaTensor's `spatial_shape`) is generated and tracked via MONAI's `push_transform()`. Images with low OCR confidence are routed to `staging_not_processed/` for manual review. A **safety lock** warns if prior spatial transforms may compromise OCR accuracy. When `ner.enabled: false`, the system falls back to regex safelist matching.
 3. **Scrub (`ScrubDicomMetadatad`)**: A pure in-memory metadata scrubber (primarily for DICOMs). It calls `AegisIdentityManager` to perform deterministic tokenization, dummy replacement, or removal of designated DICOM tags as defined in the configuration.
 4. **Save (`SaveDicomd`)**: Writes the final, de-identified datasets back to disk from memory.
 
@@ -202,8 +237,18 @@ classDiagram
 
     class RedactPixelPHI {
         +reader (thread_local)
+        +ner_classifier (thread_local)
         +detect_text()
         +apply_redaction()
+    }
+
+    class PHIClassifier {
+        +classify_texts(texts)
+        -pipeline (thread_local)
+        -phi_labels
+        -clinical_allowlist
+        -clinical_patterns
+        -phi_heuristic_patterns
     }
 
     class ScrubDicomMetadatad {
@@ -221,6 +266,7 @@ classDiagram
     RunPipeline --> RedactPixelPHI : reads stats
 
     RedactPixelPHId *-- RedactPixelPHI
+    RedactPixelPHI *-- PHIClassifier
     RedactPixelPHId --|> MapTransform
     RedactPixelPHId --|> InvertibleTransform
     ScrubDicomMetadatad *-- ScrubDicomMetadata
@@ -229,13 +275,14 @@ classDiagram
 The pipeline is intentionally designed around multithreading bottlenecks and file I/O safety when operating within a PyTorch `DataLoader(num_workers > 0)`.
 
 * **Concurrent Processing**: Steps 1–3 (`Load`, `Redact`, `Scrub`) are entirely thread-safe and operate purely in-memory. By pushing the heavy OCR computation to parallel background workers, the pipeline scales across CPU cores.
-* **Thread-Local Isolation**: To prevent locking issues and race conditions with stateful AI models, `RedactPixelPHId` utilizes Python's `threading.local()`. This guarantees every worker thread spins up its own isolated EasyOCR reader instance.
+* **Thread-Local Isolation**: To prevent locking issues and race conditions with stateful AI models, `RedactPixelPHId` utilizes Python's `threading.local()`. This guarantees every worker thread spins up its own isolated EasyOCR reader and NER classifier instances.
 * **I/O Isolation for Safety**: The pipeline intentionally marks **Step 4 (`SaveDicomd`)** as `ThreadUnsafe`. MONAI detects this and routes all dataset saving sequential actions to the main thread. This prevents file locking contentions, HDD thrashing, and ensures files uniquely derived from their source are written securely without race conditions.
 
 | Transform | Strategy | Invertible | `num_workers > 0` |
 |-----------|----------|------------|-------------------|
 | `LoadDicomRawd` | Stateless | — | ✅ Safe |
-| `RedactPixelPHId` | `threading.local()` for EasyOCR | ✅ `InvertibleTransform` | ✅ Safe |
+| `RedactPixelPHId` | `threading.local()` for EasyOCR + NER | ✅ `InvertibleTransform` | ✅ Safe |
+| `PHIClassifier` | `threading.local()` for NER pipeline | — | ✅ Safe |
 | `ScrubDicomMetadatad` | Pure in-memory, no I/O | — | ✅ Safe |
 | `SaveDicomd` | `ThreadUnsafe` mixin | — | ⚠️ Main thread sequential write |
 
@@ -289,6 +336,8 @@ Apache 2.0 (pending)
 ## 🙏 Acknowledgments
 
 - [MONAI](https://docs.monai.io/) — Medical Open Network for AI
+- [StanfordAIMI](https://huggingface.co/StanfordAIMI/stanford-deidentifier-base) — Stanford De-identifier NER model
 - [EasyOCR](https://github.com/JaidedAI/EasyOCR) — OCR detection library
+- [HuggingFace Transformers](https://huggingface.co/docs/transformers/) — NER pipeline
 - [PyDICOM](https://pydicom.github.io/) — DICOM file handling
 - [HIPAA De-identification Guidelines](https://www.hhs.gov/hipaa/for-professionals/privacy/special-topics/de-identification/index.html)

@@ -22,6 +22,7 @@ from transforms.io import LoadDicomRaw, LoadDicomRawd, SaveDicom, SaveDicomd
 from transforms.pixel import RedactPixelPHI, RedactPixelPHId
 from transforms.metadata import ScrubDicomMetadata, ScrubDicomMetadatad
 from transforms.utility import AegisIdentityManager
+from transforms.ner_classifier import PHIClassifier
 from transforms.pipeline import build_pipeline
 
 __all__ = [
@@ -36,6 +37,8 @@ __all__ = [
     # Metadata Scrubbing
     "ScrubDicomMetadata",
     "ScrubDicomMetadatad",
+    # NER
+    "PHIClassifier",
     # Utilities
     "AegisIdentityManager",
     # Pipeline

@@ -75,5 +75,54 @@ class TestPixelScrubber(unittest.TestCase):
         # Should be identical to input
         self.assertTrue(np.array_equal(noise_img, redacted_img))
 
+    # --- NER Integration Tests ---
+
+    def test_ner_phi_detected(self):
+        """Test that NER-classified PHI text is redacted."""
+        bbox = [[10, 10], [50, 10], [50, 20], [10, 20]]
+        self.mock_reader.readtext.return_value = [(bbox, 'John Doe', 0.9)]
+
+        mock_ner = MagicMock()
+        mock_ner.classify_texts.return_value = [True]  # PHI
+
+        bboxes, stats = detect_text(self.image, self.mock_reader, self.config, ner_classifier=mock_ner)
+        redacted_img = apply_redaction(self.image, bboxes)
+
+        # PHI text should be redacted (black)
+        self.assertTrue(np.all(redacted_img[10:20, 10:50, :] == 0))
+        self.assertEqual(stats['ner_classified_count'], 1)
+        self.assertEqual(stats['redacted_count'], 1)
+
+    def test_ner_clinical_preserved(self):
+        """Test that NER-classified non-PHI clinical text is preserved."""
+        bbox = [[10, 10], [50, 10], [50, 20], [10, 20]]
+        self.mock_reader.readtext.return_value = [(bbox, 'Depth 13.0', 0.9)]
+
+        mock_ner = MagicMock()
+        mock_ner.classify_texts.return_value = [False]  # Not PHI
+
+        bboxes, stats = detect_text(self.image, self.mock_reader, self.config, ner_classifier=mock_ner)
+        redacted_img = apply_redaction(self.image, bboxes)
+
+        # Non-PHI text should be preserved (still white)
+        self.assertTrue(np.all(redacted_img[10:20, 10:50, :] == 255))
+        self.assertEqual(stats['safelisted_count'], 1)
+        self.assertEqual(stats['redacted_count'], 0)
+
+    def test_ner_fallback_to_safelist(self):
+        """Test that when ner_classifier is None, regex safelist is used."""
+        bbox = [[10, 10], [50, 10], [50, 20], [10, 20]]
+        self.mock_reader.readtext.return_value = [(bbox, 'Patient', 0.9)]
+
+        # No NER classifier — should fall back to safelist
+        bboxes, stats = detect_text(self.image, self.mock_reader, self.config, ner_classifier=None)
+        redacted_img = apply_redaction(self.image, bboxes)
+
+        # "Patient" matches safelist regex — should be preserved
+        self.assertTrue(np.all(redacted_img[10:20, 10:50, :] == 255))
+        self.assertEqual(stats['safelisted_count'], 1)
+        self.assertEqual(stats['ner_classified_count'], 0)
+
 if __name__ == '__main__':
     unittest.main()
+

@@ -3,3 +3,4 @@ pydicom
 easyocr
 pillow
 pyyaml
+transformers
