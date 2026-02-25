@@ -36,7 +36,8 @@ class TestScrubDicomMetadatad(unittest.TestCase):
         # Test data with DICOM file - values > 1.1 to skip normalization
         data = {
             'image': np.ones((1, 10, 10), dtype=np.float32) * 100,
-            'image_meta_dict': {'filename_or_obj': '/path/to/file.dcm'}
+            'image_meta_dict': {'filename_or_obj': '/path/to/file.dcm'},
+            'image_dicom_dataset': mock_ds
         }
 
         # Mock the array transform's __call__ method
@@ -44,6 +45,9 @@ class TestScrubDicomMetadatad(unittest.TestCase):
         self.scrubber.transform.return_value = mock_ds
 
         result = self.scrubber(data)
+
+        # Verify dcmread was NEVER called because we provided the cached dataset
+        mock_dcmread.assert_not_called()
 
         # Verify the array transform was called
         self.scrubber.transform.assert_called_once()
@@ -74,7 +78,8 @@ class TestScrubDicomMetadatad(unittest.TestCase):
         # Grayscale input (1, H, W)
         data = {
             'image': np.ones((1, 10, 10), dtype=np.float32),
-            'image_meta_dict': {'filename_or_obj': '/path/to/file.dcm'}
+            'image_meta_dict': {'filename_or_obj': '/path/to/file.dcm'},
+            'image_dicom_dataset': mock_ds
         }
 
         # Mock the array transform to capture its arguments
@@ -82,6 +87,8 @@ class TestScrubDicomMetadatad(unittest.TestCase):
         self.scrubber.transform.return_value = mock_ds
 
         result = self.scrubber(data)
+        
+        mock_dcmread.assert_not_called()
 
         # Check that pixel_data passed was squeezed to (H, W)
         call_kwargs = self.scrubber.transform.call_args[1]

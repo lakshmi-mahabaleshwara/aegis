@@ -32,11 +32,11 @@ class LoadDicomRaw(Transform):
         MetaTensor in channel-first format (C, H, W).
     """
 
-    def __call__(self, filepath: str) -> MetaTensor:
+    def __call__(self, filepath: str, dataset: Optional[pydicom.Dataset] = None) -> MetaTensor:
         filepath = str(filepath)
 
         if filepath.lower().endswith('.dcm'):
-            ds = pydicom.dcmread(filepath)
+            ds = dataset if dataset is not None else pydicom.dcmread(filepath)
             pixel_array = ds.pixel_array.astype(np.float32)
 
             if pixel_array.ndim == 2:
@@ -84,8 +84,15 @@ class LoadDicomRawd(MapTransform):
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
         d = dict(data)
         for key in self.key_iterator(d):
-            filepath = d[key]
-            meta_tensor = self.transform(filepath)
+            filepath = str(d[key])
+            ds = None
+            
+            # Read dataset once to keep it in memory
+            if filepath.lower().endswith('.dcm'):
+                ds = pydicom.dcmread(filepath)
+                d[f"{key}_dicom_dataset"] = ds
+                
+            meta_tensor = self.transform(filepath, dataset=ds)
             d[key] = meta_tensor
             d[f"{key}_meta_dict"] = dict(meta_tensor.meta)
         return d

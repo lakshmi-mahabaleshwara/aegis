@@ -8,6 +8,7 @@ Thread-safe: no file I/O in __call__() — saving is handled by SaveDicomd.
 """
 import numpy as np
 import pydicom
+import copy
 import torch
 import logging
 from typing import Dict, Hashable, Mapping, Any, Optional
@@ -50,17 +51,23 @@ class ScrubDicomMetadata(Transform):
     def __call__(
         self,
         filepath: str,
-        pixel_data: Optional[np.ndarray] = None
+        pixel_data: Optional[np.ndarray] = None,
+        dataset: Optional[pydicom.Dataset] = None
     ) -> pydicom.Dataset:
         """
         Args:
-            filepath: Path to the DICOM file.
+            filepath: Path to the DICOM file (fallback if dataset is None).
             pixel_data: Optional redacted pixel array to inject.
+            dataset: Optional in-memory dataset to process.
 
         Returns:
             Scrubbed pydicom Dataset (in-memory, not saved to disk).
         """
-        ds = pydicom.dcmread(filepath)
+        if dataset is not None:
+            ds = copy.deepcopy(dataset)
+        else:
+            ds = pydicom.dcmread(filepath)
+
         pii_mapping = self.config.get('pii_mapping', {})
 
         # 1. Metadata Scrubbing
@@ -171,8 +178,11 @@ class ScrubDicomMetadatad(MapTransform):
                     elif pix.shape[0] == 3:
                         pix = np.transpose(pix, (1, 2, 0))
 
-                # Handle normalized float arrays
-                ds_orig = pydicom.dcmread(fpath)
+                # Handle normalized float arrays using cached dataset if available
+                ds_orig = d.get(f"{key}_dicom_dataset")
+                if ds_orig is None:
+                    ds_orig = pydicom.dcmread(fpath)
+                    
                 if pix.max() <= 1.1:
                     orig_max = ds_orig.get("LargestImagePixelValue", 4095)
                     pix = (pix * orig_max)
@@ -180,7 +190,8 @@ class ScrubDicomMetadatad(MapTransform):
                 # 3. Delegate to array transform (in-memory scrub, no save)
                 scrubbed_ds = self.transform(
                     filepath=fpath,
-                    pixel_data=pix.astype(ds_orig.pixel_array.dtype)
+                    pixel_data=pix.astype(ds_orig.pixel_array.dtype),
+                    dataset=ds_orig
                 )
 
                 # 4. Store scrubbed dataset in dict for downstream SaveDicomd

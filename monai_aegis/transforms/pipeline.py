@@ -49,15 +49,25 @@ def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str =
     keys = ['image']
 
     return Compose([
-        # 1. Load without spatial transforms → MetaTensor  (thread-safe)
+        # ==========================================
+        # INGESTION ZONE: Single Disk Read
+        # ==========================================
+        # Load file and cache pydicom.Dataset in-memory
         LoadDicomRawd(keys=keys),
 
-        # 2. Visual Redaction (EasyOCR + safelist)          (thread-safe)
+        # ==========================================
+        # LOGIC ZONE: Pure In-Memory Transforms
+        # ==========================================
+        # Visual Redaction (EasyOCR + safelist/NER)
         RedactPixelPHId(keys=keys, config=config),
 
-        # 3. Logical Redaction (DICOM metadata scrub)       (thread-safe)
+        # Logical Redaction (DICOM metadata scrub)
+        # Uses cached dataset, zero disk access
         ScrubDicomMetadatad(keys=keys, config=config),
 
-        # 4. Save scrubbed DICOM to disk                    (ThreadUnsafe — I/O)
+        # ==========================================
+        # PERSISTENCE ZONE: Single Disk Write
+        # ==========================================
+        # Save scrubbed DICOM to disk
         SaveDicomd(keys=keys, output_dir=output_dir),
     ])

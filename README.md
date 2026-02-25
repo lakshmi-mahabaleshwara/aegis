@@ -208,6 +208,7 @@ flowchart TD
     classDef output fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000;
     classDef config fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000;
     classDef decision fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#000;
+    classDef ioZone fill:#eceff1,stroke:#607d8b,stroke-width:2px,stroke-dasharray: 5 5,color:#000;
 
     subgraph Inputs ["Inputs"]
         dicom["DICOM Files (.dcm)"]:::input
@@ -217,25 +218,32 @@ flowchart TD
     config["config.yaml\n(OCR, NER, PII Mapping)"]:::config
 
     subgraph Pipeline ["Aegis Transform Pipeline"]
-        load["1. LoadDicomRawd\n(Raw File → MetaTensor)\n<i>Thread-safe</i>"]:::process
         
-        subgraph step2 ["2. RedactPixelPHId <i>(Thread-safe via threading.local)</i>"]
-            ocr["EasyOCR Engine\n(Text Detection)"]:::subProcess
-            
-            subgraph NER ["PHIClassifier (3-Layer Pipeline)"]
-                direction TB
-                L1{"1. Clinical\nAllowlist / Patterns?"}:::decision
-                L2{"2. Heuristic\nPHI Patterns?"}:::decision
-                L3["3. Stanford NER\nModel"]:::subProcess
-            end
-            
-            action_redact["Apply Black-Box\nRedaction Mask"]:::process
+        subgraph Ingestion ["INGESTION ZONE (Single Disk Read)"]
+            load["1. LoadDicomRawd\n(Raw File → MetaTensor, caches pydicom.Dataset)\n<i>Thread-safe</i>"]:::process
         end
 
-        scrub["3. ScrubDicomMetadatad\n(In-memory DICOM Metadata Scrubbing)\n<i>Thread-safe</i>"]:::process
-        id_manager["AegisIdentityManager\n(Deterministic Tokenization / Hashing)"]:::subProcess
+        subgraph Logic ["LOGIC ZONE (Purely In-Memory)"]
+            subgraph step2 ["2. RedactPixelPHId <i>(Thread-safe via threading.local)</i>"]
+                ocr["EasyOCR Engine\n(Text Detection)"]:::subProcess
+                
+                subgraph NER ["PHIClassifier (3-Layer Pipeline)"]
+                    direction TB
+                    L1{"1. Clinical\nAllowlist / Patterns?"}:::decision
+                    L2{"2. Heuristic\nPHI Patterns?"}:::decision
+                    L3["3. Stanford NER\nModel"]:::subProcess
+                end
+                
+                action_redact["Apply Black-Box\nRedaction Mask"]:::process
+            end
+
+            scrub["3. ScrubDicomMetadatad\n(Processes cached pydicom.Dataset)\n<i>Thread-safe</i>"]:::process
+            id_manager["AegisIdentityManager\n(Deterministic Tokenization / Hashing)"]:::subProcess
+        end
         
-        save["4. SaveDicomd\n(Write to Disk)\n<i>ThreadUnsafe</i>"]:::process
+        subgraph Persistence ["PERSISTENCE ZONE (Single Disk Write)"]
+            save["4. SaveDicomd\n(Write scrubbed dataset to Disk)\n<i>ThreadUnsafe</i>"]:::process
+        end
     end
 
     subgraph Outputs ["Outputs"]
@@ -270,17 +278,22 @@ flowchart TD
     save --> out_proc
 ```
 
-### Detailed Processing Steps
+An architectural priority is **strict I/O separation**, allowing the pipeline to scale efficiently across workers and cloud storage. The pipeline is split into three explicit zones:
 
-1. **Load (`LoadDicomRawd`)**: Reads various medical image formats (DICOM, JPEG, PNG) into a MONAI `MetaTensor` without mutating the original files. This avoids affine transforms that can rotate burned-in text away from OCR detection.
-2. **Redact (`RedactPixelPHId`)**: An `InvertibleTransform` that uses EasyOCR to detect text, then classifies each detection through a **3-layer pipeline**:
+### 1. Ingestion Zone (Single Disk Read)
+* **Load (`LoadDicomRawd`)**: Reads various medical image formats (DICOM, JPEG, PNG) into a MONAI `MetaTensor` without mutating the original files. Crucially, it caches the `pydicom.Dataset` in memory for downstream steps. This avoids affine transforms that can rotate burned-in text away from OCR detection.
+
+### 2. Logic Zone (Purely In-Memory)
+* **Redact (`RedactPixelPHId`)**: An `InvertibleTransform` that uses EasyOCR to detect text, then classifies each detection through a **3-layer pipeline**:
    * **(1) Clinical allowlist**: preserves known device/parameter terms.
    * **(2) PHI heuristics**: catch obvious date-IDs and institution names.
    * **(3) Stanford NER**: the `stanford-deidentifier-base` model provides semantic classification for remaining text.
    
    A binary **redaction mask** (matched to the MetaTensor's `spatial_shape`) is generated from PHI detections and tracked via MONAI's `push_transform()`. Images with low OCR confidence bypass this step and are routed to `staging_not_processed/` for manual review. A **safety lock** warns if prior spatial transforms may compromise OCR accuracy. When `ner.enabled: false`, the system falls back to regex safelist matching.
-3. **Scrub (`ScrubDicomMetadatad`)**: A pure in-memory metadata scrubber (primarily for DICOMs). It calls `AegisIdentityManager` to perform deterministic tokenization, dummy replacement, or removal of designated DICOM tags as defined in the configuration.
-4. **Save (`SaveDicomd`)**: Writes the final, de-identified datasets back to disk from memory.
+* **Scrub (`ScrubDicomMetadatad`)**: A pure in-memory metadata scrubber (primarily for DICOMs). It works entirely on the cached `pydicom.Dataset` from the Ingestion Zone without hitting the disk again. It calls `AegisIdentityManager` to perform deterministic tokenization, dummy replacement, or removal of designated DICOM tags.
+
+### 3. Persistence Zone (Single Disk Write)
+* **Save (`SaveDicomd`)**: Writes the newly generated, de-identified datasets back to disk. This is deliberately the only `ThreadUnsafe` transform in the pipeline.
 
 ### Component Interaction & Thread Safety Model
 
