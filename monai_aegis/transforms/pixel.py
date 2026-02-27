@@ -247,9 +247,10 @@ class RedactPixelPHId(MapTransform, InvertibleTransform):
     Dictionary transform: Detect and redact burned-in PHI text from medical images.
 
     Dictionary-based wrapper of :py:class:`RedactPixelPHI`.
-    Inherits from ``InvertibleTransform`` (which extends ``MapTransform``),
-    enabling the MONAI ecosystem to track redacted regions through downstream
-    spatial transforms (e.g., ``Spacingd``).
+    Inherits from both ``MapTransform`` (for ``keys`` / ``key_iterator``) and
+    ``InvertibleTransform`` (for ``push_transform`` / ``pop_transform``).
+    This is the standard MONAI pattern for invertible dictionary transforms
+    (e.g., ``Spacingd``, ``Orientationd``).
 
     Thread-safe via per-thread EasyOCR reader (``threading.local()``).
     Preserves MetaTensor metadata throughout the transform.
@@ -270,7 +271,7 @@ class RedactPixelPHId(MapTransform, InvertibleTransform):
     """
 
     def __init__(self, keys, config: Dict[str, Any], allow_missing_keys=False):
-        MapTransform.__init__(self, keys, allow_missing_keys)
+        super().__init__(keys, allow_missing_keys)
         self.transform = RedactPixelPHI(config=config)
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:

@@ -9,7 +9,32 @@ import torch
 
 from transforms.pixel import RedactPixelPHId
 from monai.data import MetaTensor
+from monai.transforms import MapTransform, InvertibleTransform
 
+
+class TestRedactPixelPHIdCompliance(unittest.TestCase):
+    """Tests for MONAI API base class compliance"""
+
+    def test_inherits_from_monai_bases(self):
+        """Verify RedactPixelPHId inherits from both MapTransform and InvertibleTransform"""
+        self.assertTrue(issubclass(RedactPixelPHId, MapTransform))
+        self.assertTrue(issubclass(RedactPixelPHId, InvertibleTransform))
+
+    def test_cooperative_init(self):
+        """Verify super().__init__() correctly initializes keys via MapTransform"""
+        config = {'ocr': {'languages': ['en']}, 'safelist': []}
+        transform = RedactPixelPHId(keys=['image', 'mask'], config=config)
+        # MapTransform stores keys as KeysCollection
+        self.assertEqual(len(transform.keys), 2)
+        self.assertFalse(transform.allow_missing_keys)
+
+    def test_has_invertible_methods(self):
+        """Verify push_transform, pop_transform, and inverse are available"""
+        config = {'ocr': {'languages': ['en']}, 'safelist': []}
+        transform = RedactPixelPHId(keys=['image'], config=config)
+        self.assertTrue(hasattr(transform, 'push_transform'))
+        self.assertTrue(hasattr(transform, 'pop_transform'))
+        self.assertTrue(hasattr(transform, 'inverse'))
 
 class TestRedactPixelPHId(unittest.TestCase):
     """Unit tests for RedactPixelPHId transform"""

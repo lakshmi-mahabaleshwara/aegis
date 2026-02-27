@@ -149,7 +149,7 @@ When `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline
 ## 🧪 Testing
 
 ```bash
-# Run all 30 unit tests
+# Run all 34 unit tests
 PYTHONPATH=monai_aegis python -m unittest discover tests/unit -v
 
 # Run integration tests
@@ -160,10 +160,11 @@ PYTHONPATH=monai_aegis python -m unittest discover tests/integration -v
 | Transform | Tests |
 |-----------|-------|
 | `RedactPixelPHI` / `RedactPixelPHId` | Visual redaction, safelist, shape preservation, invertibility, spatial transform safety warning |
+| `RedactPixelPHId` (MONAI compliance) | Inherits `MapTransform` + `InvertibleTransform`, cooperative `super().__init__()`, invertible methods |
 | `PHIClassifier` | PHI detection, clinical preservation, empty text, mixed inputs, config loading, error defaults |
 | `detect_text` / `apply_redaction` | OCR detection, confidence filtering, redaction, NER integration, safelist fallback |
-| `ScrubDicomMetadata` / `ScrubDicomMetadatad` | Tag scrubbing, no-I/O assertion, orientation |
-| `LoadDicomRawd` | DICOM and JPEG loading |
+| `ScrubDicomMetadata` / `ScrubDicomMetadatad` | Tag scrubbing, no-I/O assertion, orientation, cached dataset usage |
+| `LoadDicomRawd` | DICOM and JPEG loading, enriched metadata propagation, dataset caching, `MetaTensor.meta` reference sync |
 
 ---
 
@@ -184,7 +185,7 @@ aegis/
 │       ├── utility.py                 # AegisIdentityManager (tokenization)
 │       └── pipeline.py                # build_pipeline() composer
 ├── tests/
-│   ├── unit/                          # 30 unit tests
+│   ├── unit/                          # 34 unit tests
 │   └── integration/                   # End-to-end tests
 ├── run_pipeline.py                    # CLI entry point
 ├── Dockerfile                         # Container build
@@ -281,7 +282,7 @@ flowchart TD
 An architectural priority is **strict I/O separation**, allowing the pipeline to scale efficiently across workers and cloud storage. The pipeline is split into three explicit zones:
 
 ### 1. Ingestion Zone (Single Disk Read)
-* **Load (`LoadDicomRawd`)**: Reads various medical image formats (DICOM, JPEG, PNG) into a MONAI `MetaTensor` without mutating the original files. Crucially, it caches the `pydicom.Dataset` in memory for downstream steps. This avoids affine transforms that can rotate burned-in text away from OCR detection.
+* **Load (`LoadDicomRawd`)**: Reads various medical image formats (DICOM, JPEG, PNG) into a MONAI `MetaTensor` without mutating the original files. Crucially, it caches the `pydicom.Dataset` in memory for downstream steps and enriches the `MetaTensor.meta` with `original_channel_dim`, `modality`, `patient_id`, and `study_date`. The `{key}_meta_dict` is a **live reference** to `MetaTensor.meta` (not a copy), enabling MONAI to auto-update metadata through spatial transforms.
 
 ### 2. Logic Zone (Purely In-Memory)
 * **Redact (`RedactPixelPHId`)**: An `InvertibleTransform` that uses EasyOCR to detect text, then classifies each detection through a **3-layer pipeline**:
@@ -313,12 +314,18 @@ classDiagram
         <<Module>>
     }
 
+    class LoadDicomRawd {
+        +__call__(data)
+        -transform: LoadDicomRaw
+        <<MapTransform>>
+    }
+
     class RedactPixelPHId {
         +__call__(data)
         +inverse(data)
         +push_transform()
         -transform: RedactPixelPHI
-        <<InvertibleTransform>>
+        <<MapTransform, InvertibleTransform>>
     }
 
     class RedactPixelPHI {
@@ -340,22 +347,27 @@ classDiagram
     class ScrubDicomMetadatad {
         +__call__(data)
         -transform: ScrubDicomMetadata
+        <<MapTransform>>
     }
 
     class SaveDicomd {
         +__call__(data)
-        <<ThreadUnsafe>>
+        <<MapTransform, ThreadUnsafe>>
     }
 
     RunPipeline --> PipelineBuilder
     PipelineBuilder ..> Transforms
     RunPipeline --> RedactPixelPHI : reads stats
 
+    LoadDicomRawd --|> MapTransform
     RedactPixelPHId *-- RedactPixelPHI
     RedactPixelPHI *-- PHIClassifier
     RedactPixelPHId --|> MapTransform
     RedactPixelPHId --|> InvertibleTransform
     ScrubDicomMetadatad *-- ScrubDicomMetadata
+    ScrubDicomMetadatad --|> MapTransform
+    SaveDicomd --|> MapTransform
+    SaveDicomd --|> ThreadUnsafe
 ```
 
 The pipeline is intentionally designed around multithreading bottlenecks and file I/O safety when operating within a PyTorch `DataLoader(num_workers > 0)`.
@@ -364,13 +376,13 @@ The pipeline is intentionally designed around multithreading bottlenecks and fil
 * **Thread-Local Isolation**: To prevent locking issues and race conditions with stateful AI models, `RedactPixelPHId` utilizes Python's `threading.local()`. This guarantees every worker thread spins up its own isolated EasyOCR reader and NER classifier instances.
 * **I/O Isolation for Safety**: The pipeline intentionally marks **Step 4 (`SaveDicomd`)** as `ThreadUnsafe`. MONAI detects this and routes all dataset saving sequential actions to the main thread. This prevents file locking contentions, HDD thrashing, and ensures files uniquely derived from their source are written securely without race conditions.
 
-| Transform | Strategy | Invertible | `num_workers > 0` |
-|-----------|----------|------------|-------------------|
-| `LoadDicomRawd` | Stateless | — | ✅ Safe |
-| `RedactPixelPHId` | `threading.local()` for EasyOCR + NER | ✅ `InvertibleTransform` | ✅ Safe |
-| `PHIClassifier` | `threading.local()` for NER pipeline | — | ✅ Safe |
-| `ScrubDicomMetadatad` | Pure in-memory, no I/O | — | ✅ Safe |
-| `SaveDicomd` | `ThreadUnsafe` mixin | — | ⚠️ Main thread sequential write |
+| Transform | MONAI Bases | Strategy | Invertible | `num_workers > 0` |
+|-----------|-------------|----------|------------|-------------------|
+| `LoadDicomRawd` | `MapTransform` | Stateless, enriched `MetaTensor.meta` | — | ✅ Safe |
+| `RedactPixelPHId` | `MapTransform`, `InvertibleTransform` | `threading.local()` for EasyOCR + NER | ✅ `push/pop_transform` | ✅ Safe |
+| `PHIClassifier` | — | `threading.local()` for NER pipeline | — | ✅ Safe |
+| `ScrubDicomMetadatad` | `MapTransform` | Pure in-memory, cached dataset | — | ✅ Safe |
+| `SaveDicomd` | `MapTransform`, `ThreadUnsafe` | File I/O | — | ⚠️ Main thread sequential write |
 
 ---
 

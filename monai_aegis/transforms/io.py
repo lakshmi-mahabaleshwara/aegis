@@ -44,7 +44,14 @@ class LoadDicomRaw(Transform):
             elif pixel_array.ndim == 3 and pixel_array.shape[-1] == 3:
                 pixel_array = np.transpose(pixel_array, (2, 0, 1))  # (3, H, W)
 
-            meta = {'filename_or_obj': filepath, 'spatial_shape': pixel_array.shape[1:]}
+            meta = {
+                'filename_or_obj': filepath,
+                'spatial_shape': pixel_array.shape[1:],
+                'original_channel_dim': 0,
+                'modality': getattr(ds, 'Modality', ''),
+                'patient_id': getattr(ds, 'PatientID', ''),
+                'study_date': getattr(ds, 'StudyDate', ''),
+            }
             return MetaTensor(torch.as_tensor(pixel_array), meta=meta)
 
         else:
@@ -56,7 +63,11 @@ class LoadDicomRaw(Transform):
             elif pixel_array.ndim == 3 and pixel_array.shape[-1] in [3, 4]:
                 pixel_array = np.transpose(pixel_array[:, :, :3], (2, 0, 1))
 
-            meta = {'filename_or_obj': filepath, 'spatial_shape': pixel_array.shape[1:]}
+            meta = {
+                'filename_or_obj': filepath,
+                'spatial_shape': pixel_array.shape[1:],
+                'original_channel_dim': 0,
+            }
             return MetaTensor(torch.as_tensor(pixel_array), meta=meta)
 
 
@@ -94,7 +105,11 @@ class LoadDicomRawd(MapTransform):
                 
             meta_tensor = self.transform(filepath, dataset=ds)
             d[key] = meta_tensor
-            d[f"{key}_meta_dict"] = dict(meta_tensor.meta)
+
+            # Alias MetaTensor.meta → {key}_meta_dict for backward compatibility.
+            # Downstream transforms should prefer meta_tensor.meta directly,
+            # which MONAI will auto-update through spatial transforms.
+            d[f"{key}_meta_dict"] = meta_tensor.meta
         return d
 
 

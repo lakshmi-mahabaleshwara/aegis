@@ -33,9 +33,21 @@ class TestLoadDicomRawd(unittest.TestCase):
             self.assertEqual(result['image'].ndim, 3)
             self.assertEqual(result['image'].shape[0], 3)
             
-            # Verify metadata dict exists
+            # Verify metadata dict exists and is synced with MetaTensor.meta
             self.assertIn('image_meta_dict', result)
             self.assertEqual(result['image_meta_dict']['filename_or_obj'], jpg_path)
+            
+            # Verify enriched metadata fields
+            meta = result['image_meta_dict']
+            self.assertIn('spatial_shape', meta)
+            self.assertIn('original_channel_dim', meta)
+            self.assertEqual(meta['original_channel_dim'], 0)
+            
+            # Verify meta_dict is a reference to MetaTensor.meta (not a copy)
+            self.assertIs(result['image_meta_dict'], result['image'].meta)
+            
+            # Non-DICOM files should NOT have a cached dataset
+            self.assertNotIn('image_dicom_dataset', result)
         finally:
             import os
             os.unlink(jpg_path)
@@ -59,6 +71,59 @@ class TestLoadDicomRawd(unittest.TestCase):
         finally:
             import os
             os.unlink(jpg_path)
+
+    def test_dicom_loading_caches_dataset(self):
+        """Test that DICOM loading caches pydicom.Dataset and enriches metadata"""
+        import pydicom
+        from pydicom.dataset import Dataset, FileDataset
+        from pydicom.uid import ExplicitVRLittleEndian
+        import tempfile
+        
+        # Create a minimal DICOM file
+        suffix = '.dcm'
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            dcm_path = f.name
+        
+        file_meta = pydicom.Dataset()
+        file_meta.MediaStorageSOPClassUID = '1.2.840.10008.5.1.4.1.1.2'
+        file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
+        file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+        
+        ds = FileDataset(dcm_path, {}, file_meta=file_meta, preamble=b"\x00" * 128)
+        ds.Rows = 10
+        ds.Columns = 10
+        ds.BitsAllocated = 16
+        ds.BitsStored = 16
+        ds.HighBit = 15
+        ds.PixelRepresentation = 0
+        ds.SamplesPerPixel = 1
+        ds.PhotometricInterpretation = 'MONOCHROME2'
+        ds.PixelData = np.zeros((10, 10), dtype=np.uint16).tobytes()
+        ds.Modality = 'US'
+        ds.PatientID = 'TEST123'
+        ds.StudyDate = '20260101'
+        ds.save_as(dcm_path)
+        
+        try:
+            data = {'image': dcm_path}
+            result = self.loader(data)
+            
+            # Verify cached pydicom.Dataset
+            self.assertIn('image_dicom_dataset', result)
+            self.assertIsInstance(result['image_dicom_dataset'], pydicom.Dataset)
+            
+            # Verify enriched DICOM metadata in MetaTensor.meta
+            meta = result['image'].meta
+            self.assertEqual(meta['modality'], 'US')
+            self.assertEqual(meta['patient_id'], 'TEST123')
+            self.assertEqual(meta['study_date'], '20260101')
+            self.assertEqual(meta['original_channel_dim'], 0)
+            
+            # Verify meta_dict is a reference (not a detached copy)
+            self.assertIs(result['image_meta_dict'], result['image'].meta)
+        finally:
+            import os
+            os.unlink(dcm_path)
 
 
 if __name__ == '__main__':
