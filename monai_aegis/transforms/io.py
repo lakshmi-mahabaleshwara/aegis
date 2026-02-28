@@ -13,6 +13,10 @@ from PIL import Image
 from monai.transforms import Transform, MapTransform, ThreadUnsafe
 from monai.data import MetaTensor
 
+from transforms.exceptions import (
+    DicomLoadError, ImageLoadError, DicomSaveError
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,8 +40,15 @@ class LoadDicomRaw(Transform):
         filepath = str(filepath)
 
         if filepath.lower().endswith('.dcm'):
-            ds = dataset if dataset is not None else pydicom.dcmread(filepath)
-            pixel_array = ds.pixel_array.astype(np.float32)
+            try:
+                ds = dataset if dataset is not None else pydicom.dcmread(filepath)
+                pixel_array = ds.pixel_array.astype(np.float32)
+            except Exception as e:
+                raise DicomLoadError(
+                    f"Failed to read DICOM: {e}",
+                    filepath=filepath,
+                    transform="LoadDicomRaw",
+                ) from e
 
             if pixel_array.ndim == 2:
                 pixel_array = pixel_array[np.newaxis, ...]  # (1, H, W)
@@ -55,8 +66,15 @@ class LoadDicomRaw(Transform):
             return MetaTensor(torch.as_tensor(pixel_array), meta=meta)
 
         else:
-            img = Image.open(filepath)
-            pixel_array = np.array(img).astype(np.float32)
+            try:
+                img = Image.open(filepath)
+                pixel_array = np.array(img).astype(np.float32)
+            except Exception as e:
+                raise ImageLoadError(
+                    f"Failed to read image: {e}",
+                    filepath=filepath,
+                    transform="LoadDicomRaw",
+                ) from e
 
             if pixel_array.ndim == 2:
                 pixel_array = pixel_array[np.newaxis, ...]
@@ -96,20 +114,27 @@ class LoadDicomRawd(MapTransform):
         d = dict(data)
         for key in self.key_iterator(d):
             filepath = str(d[key])
-            ds = None
-            
-            # Read dataset once to keep it in memory
-            if filepath.lower().endswith('.dcm'):
-                ds = pydicom.dcmread(filepath)
-                d[f"{key}_dicom_dataset"] = ds
+            try:
+                ds = None
                 
-            meta_tensor = self.transform(filepath, dataset=ds)
-            d[key] = meta_tensor
+                # Read dataset once to keep it in memory
+                if filepath.lower().endswith('.dcm'):
+                    ds = pydicom.dcmread(filepath)
+                    d[f"{key}_dicom_dataset"] = ds
+                    
+                meta_tensor = self.transform(filepath, dataset=ds)
+                d[key] = meta_tensor
 
-            # Alias MetaTensor.meta → {key}_meta_dict for backward compatibility.
-            # Downstream transforms should prefer meta_tensor.meta directly,
-            # which MONAI will auto-update through spatial transforms.
-            d[f"{key}_meta_dict"] = meta_tensor.meta
+                # Alias MetaTensor.meta → {key}_meta_dict for backward compatibility.
+                d[f"{key}_meta_dict"] = meta_tensor.meta
+            except (DicomLoadError, ImageLoadError):
+                raise
+            except Exception as e:
+                raise DicomLoadError(
+                    f"Unexpected error loading file: {e}",
+                    filepath=filepath,
+                    transform="LoadDicomRawd",
+                ) from e
         return d
 
 
@@ -150,7 +175,14 @@ class SaveDicom(Transform):
             Path to the saved file.
         """
         out_path = os.path.join(self.output_dir, os.path.basename(filepath))
-        dataset.save_as(out_path)
+        try:
+            dataset.save_as(out_path)
+        except Exception as e:
+            raise DicomSaveError(
+                f"Failed to save scrubbed DICOM: {e}",
+                filepath=out_path,
+                transform="SaveDicom",
+            ) from e
         logger.info(f"Saved scrubbed DICOM to {out_path}")
         return out_path
 
@@ -200,6 +232,15 @@ class SaveDicomd(MapTransform, ThreadUnsafe):
             if not fpath:
                 continue
 
-            self.saver(dataset=scrubbed_ds, filepath=fpath)
+            try:
+                self.saver(dataset=scrubbed_ds, filepath=fpath)
+            except DicomSaveError:
+                raise
+            except Exception as e:
+                raise DicomSaveError(
+                    f"Unexpected error saving DICOM: {e}",
+                    filepath=str(fpath),
+                    transform="SaveDicomd",
+                ) from e
 
         return d

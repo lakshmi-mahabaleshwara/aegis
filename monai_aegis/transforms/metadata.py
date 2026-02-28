@@ -16,6 +16,7 @@ from monai.transforms import Transform, MapTransform
 from monai.data import MetaTensor
 
 from transforms.utility import AegisIdentityManager
+from transforms.exceptions import MetadataScrubError
 
 logger = logging.getLogger(__name__)
 
@@ -212,8 +213,13 @@ class ScrubDicomMetadatad(MapTransform):
                     else:
                         d[key] = scrubbed_pix
 
-            except Exception as e:
-                logger.error(f"Error in ScrubDicomMetadatad for file {fpath}: {e}")
+            except MetadataScrubError:
                 raise
+            except Exception as e:
+                raise MetadataScrubError(
+                    f"Metadata scrubbing failed: {e}",
+                    filepath=str(fpath),
+                    transform="ScrubDicomMetadatad",
+                ) from e
 
         return d

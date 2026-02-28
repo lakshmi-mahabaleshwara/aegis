@@ -149,7 +149,7 @@ When `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline
 ## 🧪 Testing
 
 ```bash
-# Run all 34 unit tests
+# Run all 43 unit tests
 PYTHONPATH=monai_aegis python -m unittest discover tests/unit -v
 
 # Run integration tests
@@ -165,6 +165,7 @@ PYTHONPATH=monai_aegis python -m unittest discover tests/integration -v
 | `detect_text` / `apply_redaction` | OCR detection, confidence filtering, redaction, NER integration, safelist fallback |
 | `ScrubDicomMetadata` / `ScrubDicomMetadatad` | Tag scrubbing, no-I/O assertion, orientation, cached dataset usage |
 | `LoadDicomRawd` | DICOM and JPEG loading, enriched metadata propagation, dataset caching, `MetaTensor.meta` reference sync |
+| Exception handling | Hierarchy, context propagation, corrupted DICOM/JPEG, missing files, write failures |
 
 ---
 
@@ -182,10 +183,11 @@ aegis/
 │       ├── pixel.py                   # RedactPixelPHI/d (thread-safe OCR + NER)
 │       ├── ner_classifier.py          # PHIClassifier (Stanford NER wrapper)
 │       ├── metadata.py                # ScrubDicomMetadata/d (pure in-memory)
+│       ├── exceptions.py              # Custom exception hierarchy
 │       ├── utility.py                 # AegisIdentityManager (tokenization)
 │       └── pipeline.py                # build_pipeline() composer
 ├── tests/
-│   ├── unit/                          # 34 unit tests
+│   ├── unit/                          # 43 unit tests
 │   └── integration/                   # End-to-end tests
 ├── run_pipeline.py                    # CLI entry point
 ├── Dockerfile                         # Container build
@@ -383,6 +385,34 @@ The pipeline is intentionally designed around multithreading bottlenecks and fil
 | `PHIClassifier` | — | `threading.local()` for NER pipeline | — | ✅ Safe |
 | `ScrubDicomMetadatad` | `MapTransform` | Pure in-memory, cached dataset | — | ✅ Safe |
 | `SaveDicomd` | `MapTransform`, `ThreadUnsafe` | File I/O | — | ⚠️ Main thread sequential write |
+
+---
+
+## ⚠️ Error Handling
+
+All transforms use a custom exception hierarchy (defined in `exceptions.py`) that carries **filepath** and **transform name** for diagnostic context:
+
+```
+AegisTransformError          ← base (catch-all)
+├── DicomLoadError           ← corrupted / unreadable DICOM
+├── ImageLoadError           ← unreadable JPEG / PNG
+├── PixelRedactionError      ← OCR / NER failure
+├── MetadataScrubError       ← tag parsing / pixel injection
+└── DicomSaveError           ← write failure
+```
+
+**Usage in calling code:**
+
+```python
+from transforms.exceptions import AegisTransformError, DicomLoadError
+
+try:
+    result = pipeline({'image': filepath})
+except DicomLoadError as e:
+    print(f"Bad DICOM: {e.filepath} in {e.transform}")
+except AegisTransformError as e:
+    print(f"Pipeline error: {e}")  # catches any transform failure
+```
 
 ---
 

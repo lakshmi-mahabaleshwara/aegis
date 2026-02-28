@@ -24,6 +24,14 @@ from transforms.metadata import ScrubDicomMetadata, ScrubDicomMetadatad
 from transforms.utility import AegisIdentityManager
 from transforms.ner_classifier import PHIClassifier
 from transforms.pipeline import build_pipeline
+from transforms.exceptions import (
+    AegisTransformError,
+    DicomLoadError,
+    ImageLoadError,
+    PixelRedactionError,
+    MetadataScrubError,
+    DicomSaveError,
+)
 
 __all__ = [
     # I/O
@@ -43,4 +51,11 @@ __all__ = [
     "AegisIdentityManager",
     # Pipeline
     "build_pipeline",
+    # Exceptions
+    "AegisTransformError",
+    "DicomLoadError",
+    "ImageLoadError",
+    "PixelRedactionError",
+    "MetadataScrubError",
+    "DicomSaveError",
 ]

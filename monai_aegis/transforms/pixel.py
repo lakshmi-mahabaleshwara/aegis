@@ -18,6 +18,8 @@ from typing import Dict, Hashable, Mapping, Any, List, Optional
 from monai.transforms import Transform, MapTransform, InvertibleTransform
 from monai.data import MetaTensor
 
+from transforms.exceptions import PixelRedactionError
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,7 +107,10 @@ def detect_text(
                     stats['redacted_count'] += 1
 
     except Exception as e:
-        logger.error(f"Error in detect_text: {e}")
+        raise PixelRedactionError(
+            f"OCR/redaction failed: {e}",
+            transform="detect_text",
+        ) from e
 
     return bboxes, stats
 
@@ -277,59 +282,73 @@ class RedactPixelPHId(MapTransform, InvertibleTransform):
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
         d = dict(data)
         for key in self.key_iterator(d):
-            input_tensor = d[key]
+            # Extract filepath for error context
+            meta = d.get(f"{key}_meta_dict", {})
+            filepath = meta.get('filename_or_obj', '<unknown>')
+            if isinstance(filepath, list):
+                filepath = filepath[0]
 
-            # Safety lock: warn if prior spatial transforms detected
-            if isinstance(input_tensor, MetaTensor):
-                applied_ops = input_tensor.applied_operations if hasattr(input_tensor, 'applied_operations') else []
-                if len(applied_ops) > 0:
-                    logger.warning(
-                        "Aegis detected prior spatial transforms; "
-                        "OCR accuracy may be compromised."
-                    )
+            try:
+                input_tensor = d[key]
 
-            # Extract numpy from MetaTensor/Tensor
-            if hasattr(input_tensor, 'detach'):
-                pixel_array = input_tensor.detach().cpu().numpy()
-            else:
-                pixel_array = np.array(input_tensor)
+                # Safety lock: warn if prior spatial transforms detected
+                if isinstance(input_tensor, MetaTensor):
+                    applied_ops = input_tensor.applied_operations if hasattr(input_tensor, 'applied_operations') else []
+                    if len(applied_ops) > 0:
+                        logger.warning(
+                            "Aegis detected prior spatial transforms; "
+                            "OCR accuracy may be compromised."
+                        )
 
-            # Apply array transform
-            redacted = self.transform(pixel_array)
+                # Extract numpy from MetaTensor/Tensor
+                if hasattr(input_tensor, 'detach'):
+                    pixel_array = input_tensor.detach().cpu().numpy()
+                else:
+                    pixel_array = np.array(input_tensor)
 
-            # Store redaction stats for downstream routing
-            stats = getattr(self.transform, 'last_stats', {})
-            d[f"{key}_redaction_stats"] = stats
+                # Apply array transform
+                redacted = self.transform(pixel_array)
 
-            # Generate binary redaction mask matched to spatial_shape
-            # Mask is 1 where pixels were zeroed (redacted), 0 elsewhere
-            spatial_shape = pixel_array.shape[1:]  # (H, W) from (C, H, W)
-            redaction_mask = np.zeros(spatial_shape, dtype=np.uint8)
-            bboxes = getattr(self.transform, 'last_stats', {}).get('_bboxes', [])
+                # Store redaction stats for downstream routing
+                stats = getattr(self.transform, 'last_stats', {})
+                d[f"{key}_redaction_stats"] = stats
 
-            # Recompute mask from the difference between original and redacted
-            if pixel_array.ndim == 3:
-                diff = np.any(pixel_array != redacted, axis=0)
-            else:
-                diff = pixel_array != redacted
-            redaction_mask = diff.astype(np.uint8)
-            d[f"{key}_redaction_mask"] = redaction_mask
+                # Generate binary redaction mask matched to spatial_shape
+                spatial_shape = pixel_array.shape[1:]  # (H, W) from (C, H, W)
+                redaction_mask = np.zeros(spatial_shape, dtype=np.uint8)
+                bboxes = getattr(self.transform, 'last_stats', {}).get('_bboxes', [])
 
-            # Preserve MetaTensor
-            if isinstance(input_tensor, MetaTensor):
-                d[key] = MetaTensor(torch.as_tensor(redacted), meta=input_tensor.meta)
-            else:
-                d[key] = redacted
+                # Recompute mask from the difference between original and redacted
+                if pixel_array.ndim == 3:
+                    diff = np.any(pixel_array != redacted, axis=0)
+                else:
+                    diff = pixel_array != redacted
+                redaction_mask = diff.astype(np.uint8)
+                d[f"{key}_redaction_mask"] = redaction_mask
 
-            # Push transform info for MONAI invertibility tracking
-            self.push_transform(
-                d,
-                key,
-                extra_info={
-                    'redaction_stats': stats,
-                    'redaction_mask_shape': list(redaction_mask.shape),
-                }
-            )
+                # Preserve MetaTensor
+                if isinstance(input_tensor, MetaTensor):
+                    d[key] = MetaTensor(torch.as_tensor(redacted), meta=input_tensor.meta)
+                else:
+                    d[key] = redacted
+
+                # Push transform info for MONAI invertibility tracking
+                self.push_transform(
+                    d,
+                    key,
+                    extra_info={
+                        'redaction_stats': stats,
+                        'redaction_mask_shape': list(redaction_mask.shape),
+                    }
+                )
+            except PixelRedactionError:
+                raise
+            except Exception as e:
+                raise PixelRedactionError(
+                    f"Pixel redaction failed: {e}",
+                    filepath=str(filepath),
+                    transform="RedactPixelPHId",
+                ) from e
 
         return d
 
