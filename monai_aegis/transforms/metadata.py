@@ -4,7 +4,12 @@ MONAI Aegis Metadata Transforms — ScrubDicomMetadata / ScrubDicomMetadatad
 DICOM metadata de-identification with configurable PII actions
 (REMOVE, ZERO, DUMMY) and pixel data injection.
 
-Thread-safe: no file I/O in __call__() — saving is handled by SaveDicomd.
+Thread-safe: no file I/O in ``__call__()`` — saving is handled by
+:py:class:`SaveDicomd`.
+
+Raises:
+    MetadataScrubError: When tag parsing, pixel injection, or dataset
+        manipulation fails during scrubbing.
 """
 import numpy as np
 import pydicom
@@ -12,6 +17,7 @@ import copy
 import torch
 import logging
 from typing import Dict, Hashable, Mapping, Any, Optional
+from monai.config import KeysCollection
 from monai.transforms import Transform, MapTransform
 from monai.data import MetaTensor
 
@@ -63,6 +69,10 @@ class ScrubDicomMetadata(Transform):
 
         Returns:
             Scrubbed pydicom Dataset (in-memory, not saved to disk).
+
+        Raises:
+            MetadataScrubError: If tag parsing or pixel injection fails
+                (raised by the calling dictionary transform).
         """
         if dataset is not None:
             ds = copy.deepcopy(dataset)
@@ -148,11 +158,37 @@ class ScrubDicomMetadatad(MapTransform):
         data = transform({"image": meta_tensor, "image_meta_dict": {...}})
     """
 
-    def __init__(self, keys, config: Dict[str, Any], allow_missing_keys=False):
+    def __init__(
+        self,
+        keys: KeysCollection,
+        config: Dict[str, Any],
+        allow_missing_keys: bool = False,
+    ) -> None:
         super().__init__(keys, allow_missing_keys)
         self.transform = ScrubDicomMetadata(config=config)
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
+        """Scrub PII from DICOM datasets in the data dict.
+
+        Only processes DICOM files (skips JPEG/PNG). Reads the cached
+        ``pydicom.Dataset`` from the data dict to avoid disk I/O.
+
+        Side-effects written per key:
+            - ``{key}_scrubbed_ds`` — scrubbed ``pydicom.Dataset`` for
+              downstream :py:class:`SaveDicomd`.
+            - ``{key}`` — MetaTensor updated with scrubbed pixel data.
+
+        Args:
+            data: Pipeline data dictionary containing MetaTensors and
+                cached ``{key}_dicom_dataset`` entries.
+
+        Returns:
+            Updated data dictionary with scrubbed datasets.
+
+        Raises:
+            MetadataScrubError: If tag parsing, pixel injection, or
+                dataset manipulation fails.
+        """
         d = dict(data)
         for key in self.key_iterator(d):
             try:

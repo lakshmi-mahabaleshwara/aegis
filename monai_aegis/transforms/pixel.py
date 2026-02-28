@@ -7,6 +7,9 @@ Uses EasyOCR for text detection with two classification modes:
   2. Regex Safelist (fallback) — pattern-based clinical marker preservation
 
 Thread-safe: uses threading.local() for per-thread EasyOCR and NER instances.
+
+Raises:
+    PixelRedactionError: When OCR detection or redaction fails.
 """
 import re
 import threading
@@ -14,7 +17,8 @@ import numpy as np
 import easyocr
 import logging
 import torch
-from typing import Dict, Hashable, Mapping, Any, List, Optional
+from typing import Dict, Hashable, Mapping, Any, List, Optional, Tuple
+from monai.config import KeysCollection
 from monai.transforms import Transform, MapTransform, InvertibleTransform
 from monai.data import MetaTensor
 
@@ -31,10 +35,10 @@ def detect_text(
     pixel_array: np.ndarray,
     ocr_reader: easyocr.Reader,
     config: Dict[str, Any],
-    ner_classifier=None
-) -> tuple:
+    ner_classifier: Optional[Any] = None,
+) -> Tuple[List[List], Dict[str, int]]:
     """
-    Detects text in an image and returns bounding boxes for redaction.
+    Detect text in an image and return bounding boxes of PHI regions.
 
     Uses one of two classification strategies:
       - **NER mode** (when ``ner_classifier`` is provided): sends OCR text to
@@ -42,13 +46,21 @@ def detect_text(
       - **Safelist mode** (fallback): checks text against regex patterns from config.
 
     Args:
-        pixel_array: Image data as numpy array (uint8 preferred).
+        pixel_array: Image data as numpy array, ``uint8`` preferred.
+            Shape should be ``(H, W)`` for grayscale or ``(H, W, 3)`` for RGB.
         ocr_reader: Initialized EasyOCR Reader instance.
-        config: Configuration dict with 'ocr' and 'safelist' sections.
-        ner_classifier: Optional PHIClassifier instance for NER-based detection.
+        config: Configuration dict with ``'ocr'`` and ``'safelist'`` sections.
+        ner_classifier: Optional :py:class:`PHIClassifier` instance for
+            NER-based detection. If ``None``, falls back to safelist mode.
 
     Returns:
-        Tuple of (bboxes, stats) where stats is a dict with detection metrics.
+        Tuple of ``(bboxes, stats)``:
+          - ``bboxes``: List of EasyOCR-format bounding boxes for redaction.
+          - ``stats``: Dict with ``total_detections``, ``low_confidence_count``,
+            ``safelisted_count``, ``ner_classified_count``, ``redacted_count``.
+
+    Raises:
+        PixelRedactionError: If EasyOCR or NER classification raises an error.
     """
     bboxes = []
     stats = {
@@ -115,7 +127,10 @@ def detect_text(
     return bboxes, stats
 
 
-def apply_redaction(pixel_array: np.ndarray, bboxes: List[list]) -> np.ndarray:
+def apply_redaction(
+    pixel_array: np.ndarray,
+    bboxes: List[List[List[int]]],
+) -> np.ndarray:
     """
     Applies black-box redaction to specified bounding boxes.
     Works on a copy to prevent side effects in the transform chain.
@@ -187,8 +202,12 @@ class RedactPixelPHI(Transform):
         return self._thread_local.reader
 
     @property
-    def ner_classifier(self):
-        """Lazily create a per-thread NER classifier (if NER is enabled)."""
+    def ner_classifier(self) -> Optional[Any]:
+        """Lazily create a per-thread NER classifier (if NER is enabled).
+
+        Returns:
+            A :py:class:`PHIClassifier` instance, or ``None`` if NER is disabled.
+        """
         if not self._ner_enabled:
             return None
         if not hasattr(self._thread_local, 'ner_classifier'):
@@ -275,11 +294,35 @@ class RedactPixelPHId(MapTransform, InvertibleTransform):
         data = transform({"image": meta_tensor})
     """
 
-    def __init__(self, keys, config: Dict[str, Any], allow_missing_keys=False):
+    def __init__(
+        self,
+        keys: KeysCollection,
+        config: Dict[str, Any],
+        allow_missing_keys: bool = False,
+    ) -> None:
         super().__init__(keys, allow_missing_keys)
         self.transform = RedactPixelPHI(config=config)
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
+        """Detect and redact PHI text for each keyed image in the data dict.
+
+        Side-effects written per key:
+            - ``{key}`` — redacted MetaTensor with updated pixels.
+            - ``{key}_redaction_stats`` — dict of detection/redaction counts.
+            - ``{key}_redaction_mask`` — binary ``uint8`` array ``(H, W)``
+              where ``1`` = pixel was redacted.
+            - Transform pushed to ``MetaTensor.applied_operations`` for
+              MONAI invertibility tracking.
+
+        Args:
+            data: Pipeline data dictionary containing MetaTensors.
+
+        Returns:
+            Updated data dictionary with redacted images and metadata.
+
+        Raises:
+            PixelRedactionError: If OCR detection or redaction fails.
+        """
         d = dict(data)
         for key in self.key_iterator(d):
             # Extract filepath for error context
@@ -353,6 +396,20 @@ class RedactPixelPHId(MapTransform, InvertibleTransform):
         return d
 
     def inverse(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
+        """Undo the bookkeeping added by ``__call__``.
+
+        .. note::
+            Pixel values are **permanently zeroed** by redaction and cannot
+            be restored. This method only cleans up the redaction mask,
+            stats, and MONAI transform history.
+
+        Args:
+            data: Pipeline data dictionary.
+
+        Returns:
+            Data dictionary with redaction side-keys removed and
+            transform history popped.
+        """
         d = dict(data)
         for key in self.key_iterator(d):
             # Pop the transform history entry

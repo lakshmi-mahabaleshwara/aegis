@@ -1,3 +1,10 @@
+"""
+MONAI Aegis Utility — AegisIdentityManager
+
+Deterministic identity tokenization for de-identification.
+Generates reproducible SHA-256 tokens for PII values, enabling
+re-identification when the salt is preserved.
+"""
 import hashlib
 import logging
 
@@ -13,7 +20,14 @@ class AegisIdentityManager:
     produces the same token, enabling re-identification if the salt
     is preserved.
     """
-    def __init__(self, salt: str = "monai_aegis"):
+    def __init__(self, salt: str = "monai_aegis") -> None:
+        """Initialize the identity manager.
+
+        Args:
+            salt: Secret salt for deterministic hashing. The same salt
+                must be used for consistent tokenization across runs.
+                Preserve this value if re-identification is needed.
+        """
         self.salt = salt
 
     def get_token(self, value: str) -> str:

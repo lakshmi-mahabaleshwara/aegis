@@ -2,14 +2,24 @@
 MONAI Aegis I/O Transforms — LoadDicomRaw / LoadDicomRawd / SaveDicom / SaveDicomd
 
 Load DICOM/JPEG without spatial transforms and save scrubbed DICOMs.
+
+This module contains the **Ingestion** and **Persistence** zones of the
+pipeline.  All loads are thread-safe; all saves are marked ``ThreadUnsafe``
+so MONAI routes them to the main thread in multi-worker DataLoaders.
+
+Raises:
+    DicomLoadError: When a DICOM file cannot be read or parsed.
+    ImageLoadError: When a standard image (JPEG/PNG) cannot be opened.
+    DicomSaveError: When a scrubbed dataset cannot be written to disk.
 """
 import os
 import numpy as np
 import pydicom
 import torch
 import logging
-from typing import Dict, Hashable, Mapping, Any, Optional
+from typing import Dict, Hashable, Mapping, Any, Optional, Sequence, Union
 from PIL import Image
+from monai.config import KeysCollection
 from monai.transforms import Transform, MapTransform, ThreadUnsafe
 from monai.data import MetaTensor
 
@@ -33,10 +43,33 @@ class LoadDicomRaw(Transform):
     rotate burned-in text away from OCR detection.
 
     Returns:
-        MetaTensor in channel-first format (C, H, W).
+        MetaTensor in channel-first format ``(C, H, W)``.
+
+    Raises:
+        DicomLoadError: If the DICOM file is corrupted, unreadable,
+            or missing pixel data.
+        ImageLoadError: If the JPEG/PNG file cannot be opened or decoded.
     """
 
-    def __call__(self, filepath: str, dataset: Optional[pydicom.Dataset] = None) -> MetaTensor:
+    def __call__(
+        self,
+        filepath: str,
+        dataset: Optional[pydicom.Dataset] = None,
+    ) -> MetaTensor:
+        """Load a single file and return a channel-first MetaTensor.
+
+        Args:
+            filepath: Absolute or relative path to the input file.
+                Supports ``.dcm``, ``.jpg``, ``.jpeg``, and ``.png``.
+            dataset: Pre-loaded pydicom Dataset (skips ``dcmread`` if provided).
+
+        Returns:
+            MetaTensor with shape ``(C, H, W)`` and enriched ``.meta`` dict.
+
+        Raises:
+            DicomLoadError: If the file is a DICOM that cannot be parsed.
+            ImageLoadError: If the file is a standard image that cannot be read.
+        """
         filepath = str(filepath)
 
         if filepath.lower().endswith('.dcm'):
@@ -106,11 +139,32 @@ class LoadDicomRawd(MapTransform):
         data = transform({"image": "/path/to/file.dcm"})
     """
 
-    def __init__(self, keys, allow_missing_keys=False):
+    def __init__(
+        self,
+        keys: KeysCollection,
+        allow_missing_keys: bool = False,
+    ) -> None:
         super().__init__(keys, allow_missing_keys)
         self.transform = LoadDicomRaw()
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
+        """Load each keyed file path into a MetaTensor.
+
+        Side-effects written to the data dict per key:
+            - ``{key}`` — the loaded MetaTensor ``(C, H, W)``.
+            - ``{key}_meta_dict`` — live reference to ``MetaTensor.meta``.
+            - ``{key}_dicom_dataset`` — cached ``pydicom.Dataset`` (DICOM only).
+
+        Args:
+            data: Input dictionary mapping keys to file paths.
+
+        Returns:
+            Updated dictionary with loaded tensors and metadata.
+
+        Raises:
+            DicomLoadError: If any DICOM file cannot be read.
+            ImageLoadError: If any standard image file cannot be read.
+        """
         d = dict(data)
         for key in self.key_iterator(d):
             filepath = str(d[key])
@@ -213,11 +267,30 @@ class SaveDicomd(MapTransform, ThreadUnsafe):
         ])
     """
 
-    def __init__(self, keys, output_dir: str, allow_missing_keys=False):
+    def __init__(
+        self,
+        keys: KeysCollection,
+        output_dir: str,
+        allow_missing_keys: bool = False,
+    ) -> None:
         super().__init__(keys, allow_missing_keys)
         self.saver = SaveDicom(output_dir=output_dir)
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
+        """Save scrubbed DICOM datasets found in the data dict.
+
+        Looks for ``{key}_scrubbed_ds`` entries written by
+        :py:class:`ScrubDicomMetadatad`. Non-DICOM keys are silently skipped.
+
+        Args:
+            data: Pipeline data dictionary.
+
+        Returns:
+            The data dictionary (unmodified — saving is a side-effect).
+
+        Raises:
+            DicomSaveError: If the output file cannot be written.
+        """
         d = dict(data)
         for key in self.key_iterator(d):
             scrubbed_ds = d.get(f"{key}_scrubbed_ds")
