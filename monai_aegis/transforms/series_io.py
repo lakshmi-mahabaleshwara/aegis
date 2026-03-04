@@ -23,8 +23,11 @@ import torch
 from monai.config import KeysCollection
 from monai.data import MetaTensor
 from monai.transforms import MapTransform, ThreadUnsafe, Transform
+from monai.utils.enums import TransformBackends
 
 from transforms.exceptions import SeriesLoadError, SeriesSaveError
+
+__all__ = ["LoadDicomSeries", "LoadDicomSeriesd", "SaveDicomSeries", "SaveDicomSeriesd"]
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +52,8 @@ class LoadDicomSeries(Transform):
     Raises:
         SeriesLoadError: If the series cannot be loaded or assembled.
     """
+
+    backend = [TransformBackends.NUMPY]
 
     def __call__(
         self,

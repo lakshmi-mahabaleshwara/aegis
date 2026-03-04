@@ -21,8 +21,11 @@ from typing import Dict, Hashable, Mapping, Any, List, Optional, Tuple
 from monai.config import KeysCollection
 from monai.transforms import Transform, MapTransform, InvertibleTransform
 from monai.data import MetaTensor
+from monai.utils.enums import TransformBackends
 
 from transforms.exceptions import PixelRedactionError
+
+__all__ = ["detect_text", "apply_redaction", "RedactPixelPHI", "RedactPixelPHId"]
 
 logger = logging.getLogger(__name__)
 
@@ -164,8 +167,7 @@ def apply_redaction(
 # ---------------------------------------------------------------------------
 
 class RedactPixelPHI(Transform):
-    """
-    Array transform: Detect and redact burned-in PHI text from a medical image.
+    """Array transform: Detect and redact burned-in PHI text from a medical image.
 
     Uses EasyOCR to detect text, then classifies each detection using either:
       - **Stanford NER model** (when ``ner.enabled: true`` in config) for
@@ -184,6 +186,8 @@ class RedactPixelPHI(Transform):
         transform = RedactPixelPHI(config=config)
         redacted = transform(image_array)  # numpy array in, numpy array out
     """
+
+    backend = [TransformBackends.NUMPY]
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__()

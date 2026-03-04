@@ -23,6 +23,11 @@ import pydicom
 
 from transforms.exceptions import SeriesLoadError
 
+__all__ = [
+    "DicomSliceInfo", "discover_dicoms", "group_into_series",
+    "validate_series", "sort_slices",
+]
+
 logger = logging.getLogger(__name__)
 
 # Modalities that contain pixel data suitable for de-identification

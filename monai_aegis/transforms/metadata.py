@@ -21,9 +21,12 @@ from typing import Dict, Hashable, Mapping, Any, Optional
 from monai.config import KeysCollection
 from monai.transforms import Transform, MapTransform
 from monai.data import MetaTensor
+from monai.utils.enums import TransformBackends
 
 from transforms.utility import AegisIdentityManager
 from transforms.exceptions import MetadataScrubError
+
+__all__ = ["ScrubDicomMetadata", "ScrubDicomMetadatad"]
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,8 @@ class ScrubDicomMetadata(Transform):
         transform = ScrubDicomMetadata(config=config)
         scrubbed_ds = transform(filepath="/path/to/file.dcm", pixel_data=redacted_array)
     """
+
+    backend = [TransformBackends.NUMPY]
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__()

@@ -22,10 +22,13 @@ from PIL import Image
 from monai.config import KeysCollection
 from monai.transforms import Transform, MapTransform, ThreadUnsafe
 from monai.data import MetaTensor
+from monai.utils.enums import TransformBackends
 
 from transforms.exceptions import (
     DicomLoadError, ImageLoadError, DicomSaveError
 )
+
+__all__ = ["LoadDicomRaw", "LoadDicomRawd", "SaveDicom", "SaveDicomd"]
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,8 @@ class LoadDicomRaw(Transform):
             or missing pixel data.
         ImageLoadError: If the JPEG/PNG file cannot be opened or decoded.
     """
+
+    backend = [TransformBackends.NUMPY]
 
     def __call__(
         self,
