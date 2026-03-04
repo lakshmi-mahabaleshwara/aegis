@@ -77,3 +77,22 @@ class DicomSaveError(AegisTransformError):
     permission denied, invalid dataset state.
     """
     pass
+
+
+class SeriesLoadError(AegisTransformError):
+    """Raised when a DICOM series cannot be loaded as a volume.
+
+    Common causes: inconsistent slice geometry within a series,
+    missing slices, incompatible pixel formats across slices,
+    no valid imaging files found in the series.
+    """
+    pass
+
+
+class SeriesSaveError(AegisTransformError):
+    """Raised when a de-identified DICOM series cannot be written to disk.
+
+    Common causes: output directory not writable, invalid dataset state
+    after scrubbing, slice count mismatch between volume and metadata.
+    """
+    pass

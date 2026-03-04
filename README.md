@@ -1,8 +1,8 @@
 # MONAI Aegis
 
-**Medical Image De-identification Pipeline with OCR and Metadata Scrubbing**
+**Medical Image De-identification Pipeline with OCR, NER, and Series-Aware Volume Processing**
 
-MONAI Aegis is a production-ready pipeline for de-identifying medical images (DICOM, JPEG, PNG) by removing Protected Health Information (PHI) while preserving critical clinical markers and image quality.
+MONAI Aegis is a production-ready pipeline for de-identifying medical images (DICOM series, individual DICOMs, JPEG, PNG) by removing Protected Health Information (PHI) while preserving critical clinical markers, image quality, and geometric metadata.
 
 ---
 
@@ -18,6 +18,16 @@ MONAI Aegis is a production-ready pipeline for de-identifying medical images (DI
 - **InvertibleTransform** — redaction mask tracked through MONAI's transform history for spatial consistency
 - **Fully configurable** — PHI labels, clinical allowlist, clinical patterns, and PHI heuristics all defined in `config.yaml`
 
+### Series-Aware Volume Processing (NEW)
+- **DICOM series discovery** — recursive scanning, Study/Series grouping, geometry validation
+- **Volume loading** — series loaded as `(C, D, H, W)` tensors (multi-file + multi-frame DICOM)
+- **Keyframe OCR** — samples first/middle/last slices; unified mask or slice-by-slice fallback
+- **Geometry preservation** — `PixelSpacing`, `SliceThickness`, `ImageOrientationPatient`, `ImagePositionPatient` protected during scrubbing
+- **SOPInstanceUID regeneration** — unique UIDs per output slice
+- **Original path preservation** — output folder/file names mirror input structure
+- **Dual-mode CLI** — `--mode single` (per-file) or `--mode series` (volume-aware)
+- **Automatic fallback** — non-DICOM files (JPEG, PNG) processed with single-file pipeline
+
 ### Metadata De-identification (DICOM)
 - **Configurable PII mapping** with REMOVE / DUMMY / ZERO actions
 - **Deterministic tokenization** for patient identifiers (enables re-identification if needed)
@@ -26,10 +36,10 @@ MONAI Aegis is a production-ready pipeline for de-identifying medical images (DI
 
 ### Pipeline Architecture
 - **MONAI-compliant transforms** — array + dictionary variants, `MetaTensor` propagation
+- **Two pipeline modes**: single-file (`build_pipeline`) and series-aware (`build_series_pipeline`)
 - **Invertible redaction** — `RedactPixelPHId` inherits from `InvertibleTransform`, enabling spatial tracking of redacted regions through downstream transforms
 - **Safety lock** — warns when prior spatial transforms may compromise OCR accuracy
-- **Thread-safe by design** — only `SaveDicomd` (file I/O) is `ThreadUnsafe`
-- **Four-step pipeline**: Load → Redact → Scrub → Save
+- **Thread-safe by design** — only save transforms are `ThreadUnsafe`
 - **Non-destructive** — input files remain unchanged
 
 ---
@@ -57,28 +67,35 @@ pip install -e monai_aegis/
 
 ### Python API
 ```python
-from transforms.pipeline import build_pipeline
+from transforms.pipeline import build_pipeline, build_series_pipeline
 
-# Build the de-identification pipeline
+# === Single-file mode ===
 pipeline = build_pipeline(
     config_path='monai_aegis/config/config.yaml',
     output_dir='staging_output'
 )
-
-# Process a DICOM file
 result = pipeline({'image': 'staging_input/scan.dcm'})
-
-# Process a JPEG file
 result = pipeline({'image': 'staging_input/photo.jpg'})
+
+# === Series-aware mode ===
+series_pipeline = build_series_pipeline(
+    config_path='monai_aegis/config/config.yaml',
+    output_dir='staging_output',
+    input_dir='staging_input'
+)
+result = series_pipeline({'image': ['path/slice1.dcm', 'path/slice2.dcm', ...]})
 ```
 
 ### Command-Line Runner
 ```bash
-# Process all files in staging_input/
-python run_pipeline.py --config monai_aegis/config/config.yaml
+# Single-file mode (default — processes each file independently)
+PYTHONPATH=monai_aegis python run_pipeline.py --config monai_aegis/config/config.yaml --mode single
+
+# Series-aware mode (discovers, groups, validates, and processes DICOM series as volumes)
+PYTHONPATH=monai_aegis python run_pipeline.py --config monai_aegis/config/config.yaml --mode series
 
 # Output:
-#   Processed files → staging_output/
+#   Processed files → staging_output/ (preserves original folder/file names)
 #   Low-confidence files → staging_not_processed/ (manual review)
 ```
 
@@ -89,6 +106,17 @@ python run_pipeline.py --config monai_aegis/config/config.yaml
 Edit `monai_aegis/config/config.yaml`:
 
 ```yaml
+paths:
+  input_dir: 'staging_input'
+  output_dir: 'staging_output'
+  not_processed_dir: 'staging_not_processed'
+
+series:
+  enabled: true
+  accepted_modalities: ['CT', 'MR', 'US', 'CR', 'DX', 'MG', 'PT', 'XA', 'RF', 'OT']
+  keyframe_count: 3
+  output_structure: 'hierarchical'
+
 ocr:
   languages: ['en']
   gpu_usage: false
@@ -122,6 +150,7 @@ ner:
 pii_mapping:
   '(0010, 0010)': 'DUMMY'   # PatientName → TOKEN_xxxxx
   '(0010, 0020)': 'DUMMY'   # PatientID → TOKEN_xxxxx
+  '(0010, 0030)': 'REMOVE'  # PatientBirthDate → removed
   '(0008, 0020)': 'ZERO'    # StudyDate → 00000000
   '(0008, 0050)': 'REMOVE'  # AccessionNumber → removed
 ```
@@ -149,7 +178,7 @@ When `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline
 ## 🧪 Testing
 
 ```bash
-# Run all 43 unit tests
+# Run all 61 unit tests
 PYTHONPATH=monai_aegis python -m unittest discover tests/unit -v
 
 # Run integration tests
@@ -161,10 +190,15 @@ PYTHONPATH=monai_aegis python -m unittest discover tests/integration -v
 |-----------|-------|
 | `RedactPixelPHI` / `RedactPixelPHId` | Visual redaction, safelist, shape preservation, invertibility, spatial transform safety warning |
 | `RedactPixelPHId` (MONAI compliance) | Inherits `MapTransform` + `InvertibleTransform`, cooperative `super().__init__()`, invertible methods |
+| `RedactPixelPHI` (Volume) | 4D shape preservation, keyframe OCR stats, strategy selection, small-volume keyframe fallback |
 | `PHIClassifier` | PHI detection, clinical preservation, empty text, mixed inputs, config loading, error defaults |
 | `detect_text` / `apply_redaction` | OCR detection, confidence filtering, redaction, NER integration, safelist fallback |
 | `ScrubDicomMetadata` / `ScrubDicomMetadatad` | Tag scrubbing, no-I/O assertion, orientation, cached dataset usage |
 | `LoadDicomRawd` | DICOM and JPEG loading, enriched metadata propagation, dataset caching, `MetaTensor.meta` reference sync |
+| `LoadDicomSeries` / `LoadDicomSeriesd` | Multi-file volume loading, empty input error, dictionary transform |
+| `SaveDicomSeries` | Series saving with path preservation and SOPInstanceUID regeneration |
+| `discover_dicoms`, `group_into_series` | Recursive scanning, modality filtering, Study/Series grouping |
+| `validate_series`, `sort_slices` | Geometry validation, sub-series splitting, IPP/InstanceNumber/filename sorting |
 | Exception handling | Hierarchy, context propagation, corrupted DICOM/JPEG, missing files, write failures |
 
 ---
@@ -176,20 +210,27 @@ aegis/
 ├── monai_aegis/                      # Installable package
 │   ├── pyproject.toml                # PEP 621 package config
 │   ├── config/
-│   │   └── config.yaml               # De-identification + NER settings
+│   │   └── config.yaml               # De-identification + NER + series settings
 │   └── transforms/
 │       ├── __init__.py                # Public API exports
 │       ├── io.py                      # LoadDicomRaw/d, SaveDicom/d
-│       ├── pixel.py                   # RedactPixelPHI/d (thread-safe OCR + NER)
+│       ├── series_io.py               # LoadDicomSeries/d, SaveDicomSeries/d (NEW)
+│       ├── discovery.py               # discover_dicoms, group/validate/sort (NEW)
+│       ├── pixel.py                   # RedactPixelPHI/d (OCR + NER + volume keyframe)
 │       ├── ner_classifier.py          # PHIClassifier (Stanford NER wrapper)
-│       ├── metadata.py                # ScrubDicomMetadata/d (pure in-memory)
+│       ├── metadata.py                # ScrubDicomMetadata/d (single + series scrub)
 │       ├── exceptions.py              # Custom exception hierarchy
 │       ├── utility.py                 # AegisIdentityManager (tokenization)
-│       └── pipeline.py                # build_pipeline() composer
+│       └── pipeline.py                # build_pipeline() + build_series_pipeline()
 ├── tests/
-│   ├── unit/                          # 43 unit tests
+│   ├── unit/                          # 61 unit tests
+│   │   ├── test_discovery.py          # Discovery, grouping, validation, sorting
+│   │   ├── test_series_io.py          # Series load/save transforms
+│   │   ├── test_volume_redaction.py   # Volume keyframe OCR
+│   │   └── ...                        # Existing tests
 │   └── integration/                   # End-to-end tests
-├── run_pipeline.py                    # CLI entry point
+├── run_pipeline.py                    # CLI entry point (--mode single|series)
+├── de-identification.ipynb            # Interactive walkthrough notebook
 ├── Dockerfile                         # Container build
 ├── test_docker.sh                     # Docker test script
 ├── staging_input/                     # Input files (not tracked)
@@ -381,10 +422,12 @@ The pipeline is intentionally designed around multithreading bottlenecks and fil
 | Transform | MONAI Bases | Strategy | Invertible | `num_workers > 0` |
 |-----------|-------------|----------|------------|-------------------|
 | `LoadDicomRawd` | `MapTransform` | Stateless, enriched `MetaTensor.meta` | — | ✅ Safe |
-| `RedactPixelPHId` | `MapTransform`, `InvertibleTransform` | `threading.local()` for EasyOCR + NER | ✅ `push/pop_transform` | ✅ Safe |
+| `LoadDicomSeriesd` | `MapTransform` | Stateless volume loading | — | ✅ Safe |
+| `RedactPixelPHId` | `MapTransform`, `InvertibleTransform` | `threading.local()` for EasyOCR + NER; keyframe OCR for volumes | ✅ `push/pop_transform` | ✅ Safe |
 | `PHIClassifier` | — | `threading.local()` for NER pipeline | — | ✅ Safe |
-| `ScrubDicomMetadatad` | `MapTransform` | Pure in-memory, cached dataset | — | ✅ Safe |
+| `ScrubDicomMetadatad` | `MapTransform` | Pure in-memory; geometry-preserving series scrub | — | ✅ Safe |
 | `SaveDicomd` | `MapTransform`, `ThreadUnsafe` | File I/O | — | ⚠️ Main thread sequential write |
+| `SaveDicomSeriesd` | `MapTransform`, `ThreadUnsafe` | Series file I/O, path-preserving | — | ⚠️ Main thread sequential write |
 
 ---
 
@@ -398,7 +441,9 @@ AegisTransformError          ← base (catch-all)
 ├── ImageLoadError           ← unreadable JPEG / PNG
 ├── PixelRedactionError      ← OCR / NER failure
 ├── MetadataScrubError       ← tag parsing / pixel injection
-└── DicomSaveError           ← write failure
+├── DicomSaveError           ← write failure
+├── SeriesLoadError          ← series assembly / geometry mismatch (NEW)
+└── SeriesSaveError          ← series write failure (NEW)
 ```
 
 **Usage in calling code:**

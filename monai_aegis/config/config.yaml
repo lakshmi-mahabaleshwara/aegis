@@ -1,6 +1,13 @@
 paths:
   input_dir: 'staging_input'
   output_dir: 'staging_output'
+  not_processed_dir: 'staging_not_processed'
+
+series:
+  enabled: true
+  accepted_modalities: ['CT', 'MR', 'US', 'CR', 'DX', 'MG', 'PT', 'XA', 'RF', 'OT']
+  keyframe_count: 3
+  output_structure: 'hierarchical'  # 'hierarchical' = StudyUID/SeriesUID/
 
 ocr:
   decoder: 'beamsearch'
@@ -127,3 +134,4 @@ pii_mapping:
   '(0008, 0050)': 'REMOVE' # AccessionNumber
   '(0008, 0090)': 'REMOVE' # ReferringPhysicianName
   '(0008, 0080)': 'REMOVE' # InstitutionName
+  '(0010, 0030)': 'REMOVE' # PatientBirthDate

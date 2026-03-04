@@ -218,13 +218,26 @@ class RedactPixelPHI(Transform):
         return self._thread_local.ner_classifier
 
     def __call__(self, image: np.ndarray) -> np.ndarray:
-        """
+        """Detect and redact burned-in PHI text.
+
+        Handles both 2D images ``(C, H, W)`` and 3D volumes
+        ``(C, D, H, W)``.  For volumes, keyframe-based OCR is used
+        to avoid running OCR on every slice.
+
         Args:
-            image: Image array in channel-first format (C, H, W).
+            image: Image array in channel-first format.
+                ``(C, H, W)`` for a single image or
+                ``(C, D, H, W)`` for a volume.
 
         Returns:
-            Redacted image array in same format and dtype.
+            Redacted array in the same format and dtype as input.
         """
+        if image.ndim == 4:
+            return self._redact_volume(image)
+        return self._redact_single(image)
+
+    def _redact_single(self, image: np.ndarray) -> np.ndarray:
+        """Redact PHI from a single 2D image ``(C, H, W)``."""
         orig_dtype = image.dtype
         pixel_array = image.copy()
 
@@ -260,6 +273,86 @@ class RedactPixelPHI(Transform):
             redacted = np.transpose(redacted, (2, 0, 1))
 
         return redacted.astype(orig_dtype)
+
+    def _redact_volume(self, volume: np.ndarray) -> np.ndarray:
+        """Redact PHI from a 3D volume ``(C, D, H, W)`` using keyframe OCR.
+
+        Strategy:
+          1. Sample keyframes (first, middle, last slice).
+          2. Run OCR on each keyframe.
+          3. If bounding boxes match → apply unified mask to all slices.
+          4. If bounding boxes differ → fall back to slice-by-slice OCR.
+
+        Args:
+            volume: Volume array ``(C, D, H, W)``.
+
+        Returns:
+            Redacted volume in the same shape and dtype.
+        """
+        orig_dtype = volume.dtype
+        C, D, H, W = volume.shape
+        keyframe_count = self.config.get('series', {}).get('keyframe_count', 3)
+
+        # Select keyframe indices
+        if D <= keyframe_count:
+            keyframe_indices = list(range(D))
+        else:
+            keyframe_indices = [0, D // 2, D - 1]
+
+        # Run OCR on keyframes, collect bounding boxes per keyframe
+        keyframe_bboxes = []
+        all_stats = []
+        for idx in keyframe_indices:
+            # Extract 2D slice as (C, H, W)
+            slice_2d = volume[:, idx, :, :]
+            self._redact_single(slice_2d)
+            keyframe_bboxes.append(self.last_stats.get('redacted_count', 0))
+            all_stats.append(self.last_stats.copy())
+
+        # Decide strategy: uniform mask vs slice-by-slice
+        redacted_counts = keyframe_bboxes
+        boxes_match = len(set(redacted_counts)) <= 1
+
+        result = volume.copy()
+
+        if boxes_match and redacted_counts[0] > 0:
+            # Uniform mask: redact keyframe[0] and apply same bboxes to all
+            redacted_ref = self._redact_single(volume[:, keyframe_indices[0], :, :])
+            mask = np.any(volume[:, keyframe_indices[0], :, :] != redacted_ref, axis=0)
+            for d in range(D):
+                result[:, d, :, :][..., mask] = 0
+            strategy = 'uniform_mask'
+            logger.info(
+                "Volume keyframe OCR: uniform mask applied to %d slices", D
+            )
+        elif any(c > 0 for c in redacted_counts):
+            # Slice-by-slice fallback
+            for d in range(D):
+                result[:, d, :, :] = self._redact_single(volume[:, d, :, :])
+            strategy = 'slice_by_slice'
+            logger.info(
+                "Volume keyframe OCR: slice-by-slice fallback for %d slices", D
+            )
+        else:
+            # No text detected on any keyframe — skip redaction
+            strategy = 'no_text'
+            logger.info(
+                "Volume keyframe OCR: no text detected on %d keyframes", len(keyframe_indices)
+            )
+
+        # Aggregate stats
+        self.last_stats = {
+            'total_detections': sum(s.get('total_detections', 0) for s in all_stats),
+            'low_confidence_count': sum(s.get('low_confidence_count', 0) for s in all_stats),
+            'safelisted_count': sum(s.get('safelisted_count', 0) for s in all_stats),
+            'ner_classified_count': sum(s.get('ner_classified_count', 0) for s in all_stats),
+            'redacted_count': sum(s.get('redacted_count', 0) for s in all_stats),
+            'volume_strategy': strategy,
+            'num_slices': D,
+            'keyframe_indices': keyframe_indices,
+        }
+
+        return result.astype(orig_dtype)
 
 
 # ---------------------------------------------------------------------------
