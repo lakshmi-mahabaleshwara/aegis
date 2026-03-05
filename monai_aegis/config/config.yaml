@@ -1,7 +1,7 @@
 paths:
-  input_dir: 'staging_input'
-  output_dir: 'staging_output'
-  not_processed_dir: 'staging_not_processed'
+  input_dir: '${AEGIS_INPUT_DIR:staging_input}'
+  output_dir: '${AEGIS_OUTPUT_DIR:staging_output}'
+  not_processed_dir: '${AEGIS_REVIEW_DIR:staging_not_processed}'
 
 series:
   enabled: true
@@ -19,7 +19,7 @@ ocr:
 ner:
   enabled: true
   model_name: 'StanfordAIMI/stanford-deidentifier-base'
-  device: 'cpu'  # options: 'cpu', 'cuda', 'mps'
+  device: '${AEGIS_DEVICE:cpu}'  # options: 'cpu', 'cuda', 'mps'
 
   # NER entity types treated as PHI (text matching these → redacted)
   phi_labels:

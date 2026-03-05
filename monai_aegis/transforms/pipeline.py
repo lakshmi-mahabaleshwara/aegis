@@ -7,7 +7,6 @@ Composes the de-identification transforms into MONAI Compose pipelines.
 - ``build_series_pipeline()`` — series-aware volume mode (new).
 """
 import os
-import yaml
 import torch
 import logging
 from typing import Optional
@@ -15,6 +14,7 @@ from monai.transforms import Compose
 
 from transforms.io import LoadDicomRawd, SaveDicomd
 from transforms.series_io import LoadDicomSeriesd, SaveDicomSeriesd
+from config.config_loader import load_config
 from transforms.pixel import RedactPixelPHId
 from transforms.metadata import ScrubDicomMetadatad
 
@@ -42,9 +42,8 @@ def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str =
     if not os.path.isabs(config_path):
         config_path = os.path.join(base_dir, config_path)
 
-    # Load config ONCE
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+    # Load config ONCE (with env-var resolution)
+    config = load_config(config_path)
 
     # Device Detection
     is_gpu = torch.cuda.is_available() or torch.backends.mps.is_available()
@@ -106,8 +105,7 @@ def build_series_pipeline(
     if not os.path.isabs(config_path):
         config_path = os.path.join(base_dir, config_path)
 
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+    config = load_config(config_path)
 
     is_gpu = torch.cuda.is_available() or torch.backends.mps.is_available()
     logger.info(f"Device set to: {'GPU' if is_gpu else 'CPU'}")

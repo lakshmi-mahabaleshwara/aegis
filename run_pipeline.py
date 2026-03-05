@@ -14,21 +14,18 @@ import sys
 import argparse
 import shutil
 import logging
-import yaml
 
 from transforms.pipeline import build_pipeline, build_series_pipeline
 from transforms.discovery import discover_dicoms, group_into_series, validate_series, sort_slices
 import pydicom
 from PIL import Image
 import numpy as np
+from config.config_loader import load_config
 
 logger = logging.getLogger(__name__)
 
 
-def load_config(config_path: str) -> dict:
-    """Load configuration from YAML file."""
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+
 
 
 # -----------------------------------------------------------------------
