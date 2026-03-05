@@ -15,6 +15,7 @@ from monai.transforms import Compose
 from transforms.io import LoadDicomRawd, SaveDicomd
 from transforms.series_io import LoadDicomSeriesd, SaveDicomSeriesd
 from config.config_loader import load_config
+from config.storage import AegisFileSystem
 from transforms.pixel import RedactPixelPHId
 from transforms.metadata import ScrubDicomMetadatad
 
@@ -49,6 +50,9 @@ def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str =
     is_gpu = torch.cuda.is_available() or torch.backends.mps.is_available()
     logger.info(f"Device set to: {'GPU' if is_gpu else 'CPU'}")
 
+    # Storage backend (default: local filesystem)
+    fs = AegisFileSystem.from_config(config)
+
     keys = ['image']
 
     return Compose([
@@ -56,7 +60,7 @@ def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str =
         # INGESTION ZONE: Single Disk Read
         # ==========================================
         # Load file and cache pydicom.Dataset in-memory
-        LoadDicomRawd(keys=keys),
+        LoadDicomRawd(keys=keys, fs=fs),
 
         # ==========================================
         # LOGIC ZONE: Pure In-Memory Transforms
@@ -72,7 +76,7 @@ def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str =
         # PERSISTENCE ZONE: Single Disk Write
         # ==========================================
         # Save scrubbed DICOM to disk
-        SaveDicomd(keys=keys, output_dir=output_dir),
+        SaveDicomd(keys=keys, output_dir=output_dir, fs=fs),
     ])
 
 
@@ -110,11 +114,14 @@ def build_series_pipeline(
     is_gpu = torch.cuda.is_available() or torch.backends.mps.is_available()
     logger.info(f"Device set to: {'GPU' if is_gpu else 'CPU'}")
 
+    # Storage backend
+    fs = AegisFileSystem.from_config(config)
+
     keys = ['image']
 
     return Compose([
         # Ingestion: Load series as volume (C, D, H, W)
-        LoadDicomSeriesd(keys=keys),
+        LoadDicomSeriesd(keys=keys, fs=fs),
 
         # Logic: Keyframe OCR + pixel redaction
         RedactPixelPHId(keys=keys, config=config),
@@ -123,5 +130,5 @@ def build_series_pipeline(
         ScrubDicomMetadatad(keys=keys, config=config),
 
         # Persistence: Write de-identified series (preserving folder/filenames)
-        SaveDicomSeriesd(keys=keys, output_dir=output_dir, input_dir=input_dir),
+        SaveDicomSeriesd(keys=keys, output_dir=output_dir, input_dir=input_dir, fs=fs),
     ])

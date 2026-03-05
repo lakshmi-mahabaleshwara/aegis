@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import os
 import logging
-from typing import Any, Dict, Hashable, List, Mapping, Optional
+from typing import Any, Dict, Hashable, List, Mapping, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from config.storage import AegisFileSystem
 
 import numpy as np
 import pydicom
@@ -59,6 +62,7 @@ class LoadDicomSeries(Transform):
         self,
         filepaths: List[str],
         datasets: Optional[List[pydicom.Dataset]] = None,
+        fs: Optional['AegisFileSystem'] = None,
     ) -> MetaTensor:
         """Load a series of DICOM files into a single volume tensor.
 
@@ -86,7 +90,11 @@ class LoadDicomSeries(Transform):
             datasets = []
             for fp in filepaths:
                 try:
-                    datasets.append(pydicom.dcmread(fp))
+                    if fs is not None:
+                        with fs.open_read(fp) as f:
+                            datasets.append(pydicom.dcmread(f))
+                    else:
+                        datasets.append(pydicom.dcmread(fp))
                 except Exception as e:
                     raise SeriesLoadError(
                         f"Failed to read DICOM: {e}",
@@ -233,9 +241,11 @@ class LoadDicomSeriesd(MapTransform):
         self,
         keys: KeysCollection,
         allow_missing_keys: bool = False,
+        fs: Optional['AegisFileSystem'] = None,
     ) -> None:
         super().__init__(keys, allow_missing_keys)
         self.transform = LoadDicomSeries()
+        self.fs = fs
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
         """Load each keyed list of file paths into a volume MetaTensor.
@@ -265,10 +275,14 @@ class LoadDicomSeriesd(MapTransform):
                 # Load all datasets and cache them
                 datasets: List[pydicom.Dataset] = []
                 for fp in filepaths:
-                    datasets.append(pydicom.dcmread(fp))
+                    if self.fs is not None:
+                        with self.fs.open_read(fp) as f:
+                            datasets.append(pydicom.dcmread(f))
+                    else:
+                        datasets.append(pydicom.dcmread(fp))
                 d[f"{key}_dicom_datasets"] = datasets
 
-                meta_tensor = self.transform(filepaths, datasets=datasets)
+                meta_tensor = self.transform(filepaths, datasets=datasets, fs=self.fs)
                 d[key] = meta_tensor
                 d[f"{key}_meta_dict"] = meta_tensor.meta
             except SeriesLoadError:
@@ -299,10 +313,11 @@ class SaveDicomSeries(Transform):
         input_dir: Root input directory (used to compute relative paths).
     """
 
-    def __init__(self, output_dir: str, input_dir: str = '') -> None:
+    def __init__(self, output_dir: str, input_dir: str = '', fs: Optional['AegisFileSystem'] = None) -> None:
         super().__init__()
         self.output_dir = output_dir
         self.input_dir = input_dir
+        self.fs = fs
 
     def __call__(
         self,
@@ -332,15 +347,29 @@ class SaveDicomSeries(Transform):
 
             # Preserve original folder + filename
             if self.input_dir:
-                rel_path = os.path.relpath(orig_fp, self.input_dir)
+                if self.fs is not None:
+                    rel_path = self.fs.relpath(orig_fp, self.input_dir)
+                else:
+                    rel_path = os.path.relpath(orig_fp, self.input_dir)
             else:
-                rel_path = os.path.basename(orig_fp)
+                if self.fs is not None:
+                    rel_path = self.fs.basename(orig_fp)
+                else:
+                    rel_path = os.path.basename(orig_fp)
 
-            out_path = os.path.join(self.output_dir, rel_path)
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            if self.fs is not None:
+                out_path = self.fs.join(self.output_dir, rel_path)
+                self.fs.makedirs(self.fs.dirname(out_path))
+            else:
+                out_path = os.path.join(self.output_dir, rel_path)
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
             try:
-                ds.save_as(out_path)
+                if self.fs is not None:
+                    with self.fs.open_write(out_path) as f:
+                        ds.save_as(f)
+                else:
+                    ds.save_as(out_path)
             except Exception as e:
                 raise SeriesSaveError(
                     f"Failed to save slice {i}: {e}",
@@ -387,9 +416,10 @@ class SaveDicomSeriesd(MapTransform, ThreadUnsafe):
         output_dir: str,
         input_dir: str = '',
         allow_missing_keys: bool = False,
+        fs: Optional['AegisFileSystem'] = None,
     ) -> None:
         super().__init__(keys, allow_missing_keys)
-        self.saver = SaveDicomSeries(output_dir=output_dir, input_dir=input_dir)
+        self.saver = SaveDicomSeries(output_dir=output_dir, input_dir=input_dir, fs=fs)
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
         """Save scrubbed DICOM series found in the data dict.

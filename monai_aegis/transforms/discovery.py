@@ -17,7 +17,10 @@ from __future__ import annotations
 import os
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from config.storage import AegisFileSystem
 
 import pydicom
 
@@ -84,6 +87,7 @@ class DicomSliceInfo:
 def discover_dicoms(
     folder: str,
     accepted_modalities: Optional[frozenset] = None,
+    fs: Optional['AegisFileSystem'] = None,
 ) -> List[DicomSliceInfo]:
     """Recursively scan *folder* for valid imaging DICOM files.
 
@@ -102,25 +106,41 @@ def discover_dicoms(
     Raises:
         SeriesLoadError: If *folder* does not exist or is not a directory.
     """
-    if not os.path.isdir(folder):
-        raise SeriesLoadError(
-            f"Input folder does not exist: {folder}",
-            filepath=folder,
-            transform="discover_dicoms",
-        )
+    if fs is not None:
+        if not fs.isdir(folder):
+            raise SeriesLoadError(
+                f"Input folder does not exist: {folder}",
+                filepath=folder,
+                transform="discover_dicoms",
+            )
+    else:
+        if not os.path.isdir(folder):
+            raise SeriesLoadError(
+                f"Input folder does not exist: {folder}",
+                filepath=folder,
+                transform="discover_dicoms",
+            )
 
     if accepted_modalities is None:
         accepted_modalities = ACCEPTED_MODALITIES
 
     slices: List[DicomSliceInfo] = []
 
-    for root, _dirs, files in os.walk(folder):
+    walker = fs.walk(folder) if fs is not None else os.walk(folder)
+    for root, _dirs, files in walker:
         for fname in files:
             if not fname.lower().endswith('.dcm'):
                 continue
-            fpath = os.path.join(root, fname)
+            if fs is not None:
+                fpath = fs.join(root, fname)
+            else:
+                fpath = os.path.join(root, fname)
             try:
-                ds = pydicom.dcmread(fpath, stop_before_pixels=True)
+                if fs is not None:
+                    with fs.open_read(fpath) as f:
+                        ds = pydicom.dcmread(f, stop_before_pixels=True)
+                else:
+                    ds = pydicom.dcmread(fpath, stop_before_pixels=True)
             except Exception as e:
                 logger.warning("Skipping unreadable DICOM %s: %s", fpath, e)
                 continue

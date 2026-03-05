@@ -81,6 +81,7 @@ class TestDicomSaveError(unittest.TestCase):
         from unittest.mock import MagicMock
         saver = SaveDicom.__new__(SaveDicom)
         saver.output_dir = '/nonexistent/readonly/dir'
+        saver.fs = None
 
         mock_ds = MagicMock()
         mock_ds.save_as.side_effect = OSError("Permission denied")

@@ -12,12 +12,16 @@ Raises:
     ImageLoadError: When a standard image (JPEG/PNG) cannot be opened.
     DicomSaveError: When a scrubbed dataset cannot be written to disk.
 """
+import io as _io
 import os
 import numpy as np
 import pydicom
 import torch
 import logging
-from typing import Dict, Hashable, Mapping, Any, Optional, Sequence, Union
+from typing import Dict, Hashable, Mapping, Any, Optional, Sequence, TYPE_CHECKING, Union
+
+if TYPE_CHECKING:
+    from config.storage import AegisFileSystem
 from PIL import Image
 from monai.config import KeysCollection
 from monai.transforms import Transform, MapTransform, ThreadUnsafe
@@ -60,6 +64,7 @@ class LoadDicomRaw(Transform):
         self,
         filepath: str,
         dataset: Optional[pydicom.Dataset] = None,
+        fs: Optional['AegisFileSystem'] = None,
     ) -> MetaTensor:
         """Load a single file and return a channel-first MetaTensor.
 
@@ -79,7 +84,13 @@ class LoadDicomRaw(Transform):
 
         if filepath.lower().endswith('.dcm'):
             try:
-                ds = dataset if dataset is not None else pydicom.dcmread(filepath)
+                if dataset is not None:
+                    ds = dataset
+                elif fs is not None:
+                    with fs.open_read(filepath) as f:
+                        ds = pydicom.dcmread(f)
+                else:
+                    ds = pydicom.dcmread(filepath)
                 pixel_array = ds.pixel_array.astype(np.float32)
             except Exception as e:
                 raise DicomLoadError(
@@ -105,7 +116,12 @@ class LoadDicomRaw(Transform):
 
         else:
             try:
-                img = Image.open(filepath)
+                if fs is not None:
+                    with fs.open_read(filepath) as f:
+                        img = Image.open(f)
+                        img.load()  # force read before stream closes
+                else:
+                    img = Image.open(filepath)
                 pixel_array = np.array(img).astype(np.float32)
             except Exception as e:
                 raise ImageLoadError(
@@ -148,9 +164,11 @@ class LoadDicomRawd(MapTransform):
         self,
         keys: KeysCollection,
         allow_missing_keys: bool = False,
+        fs: Optional['AegisFileSystem'] = None,
     ) -> None:
         super().__init__(keys, allow_missing_keys)
         self.transform = LoadDicomRaw()
+        self.fs = fs
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
         """Load each keyed file path into a MetaTensor.
@@ -178,10 +196,14 @@ class LoadDicomRawd(MapTransform):
                 
                 # Read dataset once to keep it in memory
                 if filepath.lower().endswith('.dcm'):
-                    ds = pydicom.dcmread(filepath)
+                    if self.fs is not None:
+                        with self.fs.open_read(filepath) as f:
+                            ds = pydicom.dcmread(f)
+                    else:
+                        ds = pydicom.dcmread(filepath)
                     d[f"{key}_dicom_dataset"] = ds
                     
-                meta_tensor = self.transform(filepath, dataset=ds)
+                meta_tensor = self.transform(filepath, dataset=ds, fs=self.fs)
                 d[key] = meta_tensor
 
                 # Alias MetaTensor.meta → {key}_meta_dict for backward compatibility.
@@ -219,10 +241,14 @@ class SaveDicom(Transform):
         saver(dataset=scrubbed_ds, filepath="/path/to/original.dcm")
     """
 
-    def __init__(self, output_dir: str):
+    def __init__(self, output_dir: str, fs: Optional['AegisFileSystem'] = None):
         super().__init__()
         self.output_dir = output_dir
-        os.makedirs(self.output_dir, exist_ok=True)
+        self.fs = fs
+        if fs is not None:
+            fs.makedirs(output_dir)
+        else:
+            os.makedirs(self.output_dir, exist_ok=True)
 
     def __call__(self, dataset: pydicom.Dataset, filepath: str) -> str:
         """
@@ -233,9 +259,16 @@ class SaveDicom(Transform):
         Returns:
             Path to the saved file.
         """
-        out_path = os.path.join(self.output_dir, os.path.basename(filepath))
+        if self.fs is not None:
+            out_path = self.fs.join(self.output_dir, self.fs.basename(filepath))
+        else:
+            out_path = os.path.join(self.output_dir, os.path.basename(filepath))
         try:
-            dataset.save_as(out_path)
+            if self.fs is not None:
+                with self.fs.open_write(out_path) as f:
+                    dataset.save_as(f)
+            else:
+                dataset.save_as(out_path)
         except Exception as e:
             raise DicomSaveError(
                 f"Failed to save scrubbed DICOM: {e}",
@@ -277,9 +310,10 @@ class SaveDicomd(MapTransform, ThreadUnsafe):
         keys: KeysCollection,
         output_dir: str,
         allow_missing_keys: bool = False,
+        fs: Optional['AegisFileSystem'] = None,
     ) -> None:
         super().__init__(keys, allow_missing_keys)
-        self.saver = SaveDicom(output_dir=output_dir)
+        self.saver = SaveDicom(output_dir=output_dir, fs=fs)
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
         """Save scrubbed DICOM datasets found in the data dict.

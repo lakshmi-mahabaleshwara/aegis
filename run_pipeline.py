@@ -21,6 +21,7 @@ import pydicom
 from PIL import Image
 import numpy as np
 from config.config_loader import load_config
+from config.storage import AegisFileSystem
 
 logger = logging.getLogger(__name__)
 
@@ -160,9 +161,12 @@ def run_series_pipeline(config_path: str) -> None:
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(not_processed_dir, exist_ok=True)
 
+    # Storage backend
+    fs = AegisFileSystem.from_config(config)
+
     # --- Step 1: Discover DICOM files ---
     logger.info("Discovering DICOM files in %s...", input_dir)
-    slices = discover_dicoms(input_dir)
+    slices = discover_dicoms(input_dir, fs=fs)
 
     if not slices:
         logger.warning("No DICOM files found. Falling back to single-file mode.")

@@ -3,6 +3,10 @@ paths:
   output_dir: '${AEGIS_OUTPUT_DIR:staging_output}'
   not_processed_dir: '${AEGIS_REVIEW_DIR:staging_not_processed}'
 
+storage:
+  protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file, s3, gs, az, memory
+  options: {}                                    # fsspec kwargs (key, secret, endpoint_url, etc.)
+
 series:
   enabled: true
   accepted_modalities: ['CT', 'MR', 'US', 'CR', 'DX', 'MG', 'PT', 'XA', 'RF', 'OT']
