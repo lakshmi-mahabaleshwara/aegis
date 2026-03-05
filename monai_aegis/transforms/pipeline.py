@@ -3,8 +3,9 @@ MONAI Aegis Pipeline Builder
 
 Composes the de-identification transforms into MONAI Compose pipelines.
 
-- ``build_pipeline()`` — single-file mode (existing).
-- ``build_series_pipeline()`` — series-aware volume mode (new).
+- ``build_pipeline()`` — single DICOM file mode.
+- ``build_series_pipeline()`` — series-aware DICOM volume mode.
+- ``build_image_pipeline()`` — standard image mode (JPEG/PNG).
 """
 import os
 import torch
@@ -12,7 +13,7 @@ import logging
 from typing import Optional
 from monai.transforms import Compose
 
-from transforms.io import LoadDicomRawd, SaveDicomd
+from transforms.io import LoadDicomRawd, SaveDicomd, LoadImaged, SaveImaged
 from transforms.series_io import LoadDicomSeriesd, SaveDicomSeriesd
 from config.config_loader import load_config
 from config.storage import AegisFileSystem
@@ -131,4 +132,50 @@ def build_series_pipeline(
 
         # Persistence: Write de-identified series (preserving folder/filenames)
         SaveDicomSeriesd(keys=keys, output_dir=output_dir, input_dir=input_dir, fs=fs),
+    ])
+
+
+def build_image_pipeline(
+    config_path: str = '../config/config.yaml',
+    output_dir: str = './output',
+    output_ext: str = '.png',
+) -> Compose:
+    """Build the Aegis image-only de-identification pipeline.
+
+    For standard images (JPEG/PNG) that need pixel redaction but have
+    no DICOM metadata to scrub.
+
+    Pipeline architecture::
+
+        LoadImaged      →  pixel array (C, H, W)
+        RedactPixelPHId →  OCR + pixel redaction (shared with DICOM)
+        SaveImaged      →  output (PNG by default)
+
+    Args:
+        config_path: Path to config.yaml.
+        output_dir: Directory for de-identified output files.
+        output_ext: Extension for output images (default ``'.png'``).
+
+    Returns:
+        A MONAI Compose pipeline ready for ``pipeline({"image": filepath})``.
+    """
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    if not os.path.isabs(config_path):
+        config_path = os.path.join(base_dir, config_path)
+
+    config = load_config(config_path)
+
+    fs = AegisFileSystem.from_config(config)
+
+    keys = ['image']
+
+    return Compose([
+        # Load: JPEG/PNG → channel-first MetaTensor
+        LoadImaged(keys=keys, fs=fs),
+
+        # Redact: shared pixel-level PHI detection (OCR + NER)
+        RedactPixelPHId(keys=keys, config=config),
+
+        # Save: channel-first → HWC → output image
+        SaveImaged(keys=keys, output_dir=output_dir, output_ext=output_ext, fs=fs),
     ])

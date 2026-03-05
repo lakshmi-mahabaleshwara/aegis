@@ -32,7 +32,10 @@ from transforms.exceptions import (
     DicomLoadError, ImageLoadError, DicomSaveError
 )
 
-__all__ = ["LoadDicomRaw", "LoadDicomRawd", "SaveDicom", "SaveDicomd"]
+__all__ = [
+    "LoadDicomRaw", "LoadDicomRawd", "SaveDicom", "SaveDicomd",
+    "LoadImage", "LoadImaged", "SaveImage", "SaveImaged",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +46,15 @@ logger = logging.getLogger(__name__)
 
 class LoadDicomRaw(Transform):
     """
-    Array transform: Load a DICOM or JPEG file without spatial transforms.
+    Array transform: Load a DICOM file without spatial transforms.
 
     Preserves original pixel orientation and returns a MetaTensor with metadata.
     Unlike MONAI's ``LoadImage``, this avoids affine transforms that can
     rotate burned-in text away from OCR detection.
+
+    .. note::
+        This transform handles **DICOM files only** (``.dcm``).
+        For JPEG/PNG images, use :py:class:`LoadImage` instead.
 
     Returns:
         MetaTensor in channel-first format ``(C, H, W)``.
@@ -55,7 +62,6 @@ class LoadDicomRaw(Transform):
     Raises:
         DicomLoadError: If the DICOM file is corrupted, unreadable,
             or missing pixel data.
-        ImageLoadError: If the JPEG/PNG file cannot be opened or decoded.
     """
 
     backend = [TransformBackends.NUMPY]
@@ -69,16 +75,15 @@ class LoadDicomRaw(Transform):
         """Load a single file and return a channel-first MetaTensor.
 
         Args:
-            filepath: Absolute or relative path to the input file.
-                Supports ``.dcm``, ``.jpg``, ``.jpeg``, and ``.png``.
+            filepath: Absolute or relative path to the ``.dcm`` file.
             dataset: Pre-loaded pydicom Dataset (skips ``dcmread`` if provided).
+            fs: Optional :py:class:`AegisFileSystem` for cloud-native I/O.
 
         Returns:
             MetaTensor with shape ``(C, H, W)`` and enriched ``.meta`` dict.
 
         Raises:
-            DicomLoadError: If the file is a DICOM that cannot be parsed.
-            ImageLoadError: If the file is a standard image that cannot be read.
+            DicomLoadError: If the file cannot be parsed.
         """
         filepath = str(filepath)
 
@@ -111,34 +116,6 @@ class LoadDicomRaw(Transform):
                 'modality': getattr(ds, 'Modality', ''),
                 'patient_id': getattr(ds, 'PatientID', ''),
                 'study_date': getattr(ds, 'StudyDate', ''),
-            }
-            return MetaTensor(torch.as_tensor(pixel_array), meta=meta)
-
-        else:
-            try:
-                if fs is not None:
-                    with fs.open_read(filepath) as f:
-                        img = Image.open(f)
-                        img.load()  # force read before stream closes
-                else:
-                    img = Image.open(filepath)
-                pixel_array = np.array(img).astype(np.float32)
-            except Exception as e:
-                raise ImageLoadError(
-                    f"Failed to read image: {e}",
-                    filepath=filepath,
-                    transform="LoadDicomRaw",
-                ) from e
-
-            if pixel_array.ndim == 2:
-                pixel_array = pixel_array[np.newaxis, ...]
-            elif pixel_array.ndim == 3 and pixel_array.shape[-1] in [3, 4]:
-                pixel_array = np.transpose(pixel_array[:, :, :3], (2, 0, 1))
-
-            meta = {
-                'filename_or_obj': filepath,
-                'spatial_shape': pixel_array.shape[1:],
-                'original_channel_dim': 0,
             }
             return MetaTensor(torch.as_tensor(pixel_array), meta=meta)
 
@@ -356,3 +333,263 @@ class SaveDicomd(MapTransform, ThreadUnsafe):
                 ) from e
 
         return d
+
+
+# ---------------------------------------------------------------------------
+# Image-only Load / Save Transforms
+# ---------------------------------------------------------------------------
+
+class LoadImage(Transform):
+    """Array transform: Load a standard image (JPEG/PNG) without spatial transforms.
+
+    Returns a MetaTensor in channel-first ``(C, H, W)`` format.
+
+    .. note::
+        This transform handles **standard images only** (``.jpg``, ``.jpeg``,
+        ``.png``).  For DICOM files, use :py:class:`LoadDicomRaw` instead.
+
+    Raises:
+        ImageLoadError: If the file cannot be opened or decoded.
+    """
+
+    backend = [TransformBackends.NUMPY]
+
+    def __call__(
+        self,
+        filepath: str,
+        fs: Optional['AegisFileSystem'] = None,
+    ) -> MetaTensor:
+        """Load a single image file and return a channel-first MetaTensor.
+
+        Args:
+            filepath: Path to ``.jpg``, ``.jpeg``, or ``.png`` file.
+            fs: Optional :py:class:`AegisFileSystem` for cloud I/O.
+
+        Returns:
+            MetaTensor with shape ``(C, H, W)`` and metadata.
+
+        Raises:
+            ImageLoadError: If the image cannot be read.
+        """
+        filepath = str(filepath)
+        try:
+            if fs is not None:
+                with fs.open_read(filepath) as f:
+                    img = Image.open(f)
+                    img.load()
+            else:
+                img = Image.open(filepath)
+            pixel_array = np.array(img).astype(np.float32)
+        except Exception as e:
+            raise ImageLoadError(
+                f"Failed to read image: {e}",
+                filepath=filepath,
+                transform="LoadImage",
+            ) from e
+
+        if pixel_array.ndim == 2:
+            pixel_array = pixel_array[np.newaxis, ...]       # (1, H, W)
+        elif pixel_array.ndim == 3 and pixel_array.shape[-1] in [3, 4]:
+            pixel_array = np.transpose(pixel_array[:, :, :3], (2, 0, 1))  # (3, H, W)
+
+        meta = {
+            'filename_or_obj': filepath,
+            'spatial_shape': pixel_array.shape[1:],
+            'original_channel_dim': 0,
+        }
+        return MetaTensor(torch.as_tensor(pixel_array), meta=meta)
+
+
+class LoadImaged(MapTransform):
+    """Dictionary transform: Load standard images (JPEG/PNG).
+
+    Dictionary-based wrapper of :py:class:`LoadImage`.
+    Thread-safe — stateless file reading only.
+
+    Args:
+        keys: Keys whose values are file paths to load.
+        allow_missing_keys: If True, skip missing keys instead of raising.
+        fs: Optional :py:class:`AegisFileSystem` for cloud I/O.
+
+    Example::
+
+        transform = LoadImaged(keys=["image"])
+        data = transform({"image": "/path/to/file.jpg"})
+    """
+
+    def __init__(
+        self,
+        keys: KeysCollection,
+        allow_missing_keys: bool = False,
+        fs: Optional['AegisFileSystem'] = None,
+    ) -> None:
+        super().__init__(keys, allow_missing_keys)
+        self.transform = LoadImage()
+        self.fs = fs
+
+    def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
+        """Load each keyed file path into a MetaTensor.
+
+        Args:
+            data: Input dictionary mapping keys to image file paths.
+
+        Returns:
+            Updated dictionary with loaded tensors and metadata.
+
+        Raises:
+            ImageLoadError: If any image file cannot be read.
+        """
+        d = dict(data)
+        for key in self.key_iterator(d):
+            filepath = str(d[key])
+            try:
+                meta_tensor = self.transform(filepath, fs=self.fs)
+                d[key] = meta_tensor
+                d[f"{key}_meta_dict"] = meta_tensor.meta
+            except ImageLoadError:
+                raise
+            except Exception as e:
+                raise ImageLoadError(
+                    f"Unexpected error loading image: {e}",
+                    filepath=filepath,
+                    transform="LoadImaged",
+                ) from e
+        return d
+
+
+class SaveImage(Transform):
+    """Array transform: Save a redacted image (JPEG/PNG) to disk.
+
+    Converts channel-first ``(C, H, W)`` MetaTensor back to HWC format
+    and writes as PNG (lossless) or JPEG.
+
+    Marked as ``ThreadUnsafe`` because it performs file I/O.
+
+    Args:
+        output_dir: Directory to write output images.
+        output_ext: Extension for output files (default ``'.png'``).
+        fs: Optional :py:class:`AegisFileSystem` for cloud I/O.
+    """
+
+    def __init__(
+        self,
+        output_dir: str,
+        output_ext: str = '.png',
+        fs: Optional['AegisFileSystem'] = None,
+    ) -> None:
+        super().__init__()
+        self.output_dir = output_dir
+        self.output_ext = output_ext
+        self.fs = fs
+        if fs is not None:
+            fs.makedirs(output_dir)
+        else:
+            os.makedirs(output_dir, exist_ok=True)
+
+    def __call__(self, tensor: MetaTensor, filepath: str) -> str:
+        """Save a redacted image.
+
+        Args:
+            tensor: Channel-first MetaTensor ``(C, H, W)`` to save.
+            filepath: Original filepath (used to derive output filename).
+
+        Returns:
+            Path to the saved file.
+        """
+        img_array = tensor.cpu().numpy() if hasattr(tensor, 'cpu') else np.array(tensor)
+
+        # Channel-first → HWC for PIL
+        if img_array.ndim == 3:
+            if img_array.shape[0] == 1:
+                img_array = img_array.squeeze(0)
+            elif img_array.shape[0] == 3:
+                img_array = np.moveaxis(img_array, 0, -1)
+
+        # Normalize to uint8
+        if img_array.dtype != np.uint8:
+            if img_array.max() <= 1.1:
+                img_array = (img_array * 255).astype(np.uint8)
+            else:
+                img_array = img_array.astype(np.uint8)
+
+        # Build output path (preserve original name, change ext if needed)
+        if self.fs is not None:
+            basename = self.fs.basename(filepath)
+        else:
+            basename = os.path.basename(filepath)
+
+        name, _ext = os.path.splitext(basename)
+        out_name = f"{name}{self.output_ext}"
+
+        if self.fs is not None:
+            out_path = self.fs.join(self.output_dir, out_name)
+            pil_img = Image.fromarray(img_array)
+            with self.fs.open_write(out_path) as f:
+                pil_img.save(f, format=self.output_ext.lstrip('.').upper())
+        else:
+            out_path = os.path.join(self.output_dir, out_name)
+            Image.fromarray(img_array).save(out_path)
+
+        logger.info("Saved redacted image to %s", out_path)
+        return out_path
+
+
+class SaveImaged(MapTransform, ThreadUnsafe):
+    """Dictionary transform: Save redacted images (JPEG/PNG) to disk.
+
+    Looks up the MetaTensor at each key, converts to HWC, and saves.
+
+    Args:
+        keys: Keys of the data dictionary to save.
+        output_dir: Directory to write output images.
+        output_ext: Extension for output files (default ``'.png'``).
+        allow_missing_keys: If True, skip missing keys instead of raising.
+        fs: Optional :py:class:`AegisFileSystem` for cloud I/O.
+
+    Example::
+
+        pipeline = Compose([
+            LoadImaged(keys=["image"]),
+            RedactPixelPHId(keys=["image"], config=config),
+            SaveImaged(keys=["image"], output_dir="./output"),
+        ])
+    """
+
+    def __init__(
+        self,
+        keys: KeysCollection,
+        output_dir: str,
+        output_ext: str = '.png',
+        allow_missing_keys: bool = False,
+        fs: Optional['AegisFileSystem'] = None,
+    ) -> None:
+        super().__init__(keys, allow_missing_keys)
+        self.saver = SaveImage(output_dir=output_dir, output_ext=output_ext, fs=fs)
+
+    def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
+        """Save redacted images found in the data dict.
+
+        Args:
+            data: Pipeline data dictionary.
+
+        Returns:
+            The data dictionary with ``{key}_saved_path`` added.
+        """
+        d = dict(data)
+        for key in self.key_iterator(d):
+            tensor = d[key]
+            if not isinstance(tensor, (MetaTensor, torch.Tensor)):
+                continue
+
+            meta = d.get(f"{key}_meta_dict", {})
+            fpath = meta.get('filename_or_obj', '')
+            if isinstance(fpath, list):
+                fpath = fpath[0]
+            if not fpath:
+                continue
+
+            out_path = self.saver(tensor=tensor, filepath=fpath)
+            d[f"{key}_saved_path"] = out_path
+
+        return d
+

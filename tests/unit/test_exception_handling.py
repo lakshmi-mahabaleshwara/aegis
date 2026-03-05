@@ -11,7 +11,7 @@ from transforms.exceptions import (
     MetadataScrubError,
     DicomSaveError,
 )
-from transforms.io import LoadDicomRawd, SaveDicom
+from transforms.io import LoadDicomRawd, LoadImaged, SaveDicom
 
 
 class TestExceptionHierarchy(unittest.TestCase):
@@ -56,7 +56,7 @@ class TestImageLoadError(unittest.TestCase):
     """Test that unreadable image files raise ImageLoadError."""
 
     def test_missing_image_file(self):
-        loader = LoadDicomRawd(keys=['image'])
+        loader = LoadImaged(keys=['image'])
         with self.assertRaises(ImageLoadError) as ctx:
             loader({'image': '/nonexistent/path/missing.jpg'})
         self.assertIn('missing.jpg', str(ctx.exception))
@@ -66,7 +66,7 @@ class TestImageLoadError(unittest.TestCase):
             f.write(b'NOT A JPEG FILE')
             bad_jpg = f.name
         try:
-            loader = LoadDicomRawd(keys=['image'])
+            loader = LoadImaged(keys=['image'])
             with self.assertRaises(ImageLoadError) as ctx:
                 loader({'image': bad_jpg})
             self.assertIn(bad_jpg, str(ctx.exception))
