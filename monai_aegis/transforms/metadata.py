@@ -59,7 +59,7 @@ class ScrubDicomMetadata(Transform):
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
         self.config = config
-        self.identity_manager = AegisIdentityManager()
+        self.identity_manager = AegisIdentityManager.from_config(config)
 
     def __call__(
         self,

@@ -7,6 +7,12 @@ storage:
   protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file, s3, gs, az, memory
   options: {}                                    # fsspec kwargs (key, secret, endpoint_url, etc.)
 
+tokenization:
+  salt: '${AEGIS_TOKEN_SALT:}'                   # Secret salt for deterministic hashing
+                                                  # Set via env var or secrets manager
+                                                  # or override in config overlay
+                                                  # Empty = use built-in default (not for production)
+
 series:
   enabled: true
   accepted_modalities: ['CT', 'MR', 'US', 'CR', 'DX', 'MG', 'PT', 'XA', 'RF', 'OT']
