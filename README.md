@@ -35,8 +35,8 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **Original path preservation** — output folder/file names mirror input structure
 
 ### Separate Pipeline Architecture
-- **DICOM pipeline** (`run_dicom_pipeline.py`) — single-file or series-aware volume mode
-- **Image pipeline** (`run_image_pipeline.py`) — JPEG/PNG pixel redaction, no DICOM metadata
+- **DICOM pipeline** (`run_dicom_pipeline.py`) — DICOM single-file or series-aware volume mode
+- **Image pipeline** (`run_image_pipeline.py`) — JPEG/PNG single-file or series-aware folder processing
 - **Unified orchestrator** (`run_pipeline.py`) — `--mode auto|dicom|image`
 - **Independent scaling** — each pipeline can run on separate infrastructure
 
@@ -53,8 +53,8 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 
 ### Pipeline Architecture
 - **MONAI-compliant transforms** — array + dictionary variants, `MetaTensor` propagation
-- **Three pipeline modes**: DICOM single-file (`build_pipeline`), DICOM series (`build_series_pipeline`), and image (`build_image_pipeline`)
-- **Shared pixel redaction** — `RedactPixelPHId` is format-agnostic, used across all three pipelines
+- **Four pipeline modes**: DICOM single (`build_pipeline`), DICOM series (`build_series_pipeline`), Image single (`build_image_pipeline`), and Image series (`build_image_series_pipeline`)
+- **Shared pixel redaction** — `RedactPixelPHId` is format-agnostic, used across all pipelines
 - **Invertible redaction** — `RedactPixelPHId` inherits from `InvertibleTransform`, enabling spatial tracking of redacted regions through downstream transforms
 - **Safety lock** — warns when prior spatial transforms may compromise OCR accuracy
 - **Thread-safe by design** — only save transforms are `ThreadUnsafe`
@@ -102,12 +102,20 @@ series_pipeline = build_series_pipeline(
 )
 result = series_pipeline({'image': ['path/slice1.dcm', 'path/slice2.dcm', ...]})
 
-# === Image mode (JPEG/PNG) ===
+# === Image mode (single JPEG/PNG) ===
 image_pipeline = build_image_pipeline(
     config_path='monai_aegis/config/config.yaml',
     output_dir='staging_output'
 )
 result = image_pipeline({'image': 'staging_input/photo.jpg'})
+
+# === Image series mode (folder of JPEG/PNG) ===
+from transforms.pipeline import build_image_series_pipeline
+img_series_pipeline = build_image_series_pipeline(
+    config_path='monai_aegis/config/config.yaml',
+    output_dir='staging_output'
+)
+result = img_series_pipeline({'image': ['path/img1.png', 'path/img2.png']})
 ```
 
 ### Command-Line Runners
@@ -118,14 +126,17 @@ PYTHONPATH=monai_aegis python run_dicom_pipeline.py --config monai_aegis/config/
 # DICOM pipeline — single-file mode
 PYTHONPATH=monai_aegis python run_dicom_pipeline.py --config monai_aegis/config/config.yaml --mode single
 
-# Image pipeline — JPEG/PNG only
+# Image pipeline — series mode (default)
 PYTHONPATH=monai_aegis python run_image_pipeline.py --config monai_aegis/config/config.yaml
+
+# Image pipeline — single-file mode
+PYTHONPATH=monai_aegis python run_image_pipeline.py --config monai_aegis/config/config.yaml --mode single
 
 # Unified orchestrator — runs both DICOM and Image pipelines
 PYTHONPATH=monai_aegis python run_pipeline.py --config monai_aegis/config/config.yaml --mode auto
 
 # Output:
-#   Processed files → staging_output/ (preserves original folder/file names)
+#   Processed files → staging_output/dicom/YYYY-MM-DD/ or staging_output/image/YYYY-MM-DD/
 #   Low-confidence files → staging_not_processed/ (manual review)
 ```
 
@@ -336,7 +347,7 @@ flowchart TD
     subgraph Pipeline ["Aegis Transform Pipeline"]
         
         subgraph Ingestion ["INGESTION ZONE (Single Disk Read)"]
-            load["1. LoadDicomRawd\n(Raw File → MetaTensor, caches pydicom.Dataset)\n<i>Thread-safe</i>"]:::process
+            load["1. Load Transforms\n(LoadDicomRawd / LoadDicomSeriesd / LoadImaged / LoadImageSeriesd)\n(Raw Files → MetaTensor(s))\n<i>Thread-safe</i>"]:::process
         end
 
         subgraph Logic ["LOGIC ZONE (Purely In-Memory)"]
@@ -358,7 +369,7 @@ flowchart TD
         end
         
         subgraph Persistence ["PERSISTENCE ZONE (Single Disk Write)"]
-            save["4. SaveDicomd\n(Write scrubbed dataset to Disk)\n<i>ThreadUnsafe</i>"]:::process
+            save["4. Save Transforms\n(SaveDicomd / SaveDicomSeriesd / SaveImaged / SaveImageSeriesd)\n(Write to Disk tokens)\n<i>ThreadUnsafe</i>"]:::process
         end
     end
 
