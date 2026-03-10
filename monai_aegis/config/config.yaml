@@ -2,6 +2,8 @@ paths:
   input_dir: '${AEGIS_INPUT_DIR:staging_input}'
   output_dir: '${AEGIS_OUTPUT_DIR:staging_output}'
   not_processed_dir: '${AEGIS_REVIEW_DIR:staging_not_processed}'
+  dicom_folder: 'dicom'
+  image_folder: 'image'
 
 storage:
   protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file, s3, gs, az, memory

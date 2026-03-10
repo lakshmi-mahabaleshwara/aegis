@@ -28,7 +28,7 @@ from transforms.exceptions import SeriesLoadError
 
 __all__ = [
     "DicomSliceInfo", "discover_dicoms", "group_into_series",
-    "validate_series", "sort_slices",
+    "validate_series", "sort_slices", "discover_images",
 ]
 
 logger = logging.getLogger(__name__)
@@ -190,6 +190,66 @@ def discover_dicoms(
 
     logger.info("Discovered %d imaging DICOM slices in %s", len(slices), folder)
     return slices
+
+
+def discover_images(
+    folder: str,
+    accepted_extensions: Optional[frozenset] = None,
+    fs: Optional['AegisFileSystem'] = None,
+) -> List[str]:
+    """Recursively scan *folder* for standard imaging files (JPEGs/PNGs).
+
+    Args:
+        folder: Root directory to scan.
+        accepted_extensions: Set of extensions to accept (e.g., {'.jpg', '.png'}).
+            Defaults to {'.jpg', '.jpeg', '.png'}.
+
+    Returns:
+        Sorted list of absolute file paths found.
+
+    Raises:
+        SeriesLoadError: If *folder* does not exist or is not a directory.
+    """
+    if fs is not None:
+        if not fs.isdir(folder):
+            raise SeriesLoadError(
+                f"Input folder does not exist: {folder}",
+                filepath=folder,
+                transform="discover_images",
+            )
+    else:
+        if not os.path.isdir(folder):
+            raise SeriesLoadError(
+                f"Input folder does not exist: {folder}",
+                filepath=folder,
+                transform="discover_images",
+            )
+
+    if accepted_extensions is None:
+        accepted_extensions = frozenset(['.jpg', '.jpeg', '.png'])
+
+    images: List[str] = []
+
+    walker = fs.walk(folder) if fs is not None else os.walk(folder)
+    for root, _dirs, files in walker:
+        for fname in files:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in accepted_extensions:
+                continue
+                
+            if fs is not None:
+                fpath = fs.join(root, fname)
+            else:
+                fpath = os.path.join(root, fname)
+            
+            images.append(fpath)
+
+    # Sort alphabetically by path as there is no spatial metadata.
+    images.sort()
+
+    logger.info("Discovered %d standard images in %s", len(images), folder)
+    return images
+
 
 
 # -----------------------------------------------------------------------

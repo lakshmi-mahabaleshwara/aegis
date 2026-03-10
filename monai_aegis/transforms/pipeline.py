@@ -6,6 +6,7 @@ Composes the de-identification transforms into MONAI Compose pipelines.
 - ``build_pipeline()`` — single DICOM file mode.
 - ``build_series_pipeline()`` — series-aware DICOM volume mode.
 - ``build_image_pipeline()`` — standard image mode (JPEG/PNG).
+- ``build_image_series_pipeline()`` — standard image volume mode (JPEG/PNG series).
 """
 import os
 import torch
@@ -15,6 +16,7 @@ from monai.transforms import Compose
 
 from transforms.io import LoadDicomRawd, SaveDicomd, LoadImaged, SaveImaged
 from transforms.series_io import LoadDicomSeriesd, SaveDicomSeriesd
+from transforms.image_series_io import LoadImageSeriesd, SaveImageSeriesd
 from config.config_loader import load_config
 from config.storage import AegisFileSystem
 from transforms.pixel import RedactPixelPHId
@@ -122,7 +124,7 @@ def build_series_pipeline(
 
     return Compose([
         # Ingestion: Load series as volume (C, D, H, W)
-        LoadDicomSeriesd(keys=keys, fs=fs),
+        LoadDicomSeriesd(keys=keys, config=config, fs=fs),
 
         # Logic: Keyframe OCR + pixel redaction
         RedactPixelPHId(keys=keys, config=config),
@@ -171,11 +173,52 @@ def build_image_pipeline(
 
     return Compose([
         # Load: JPEG/PNG → channel-first MetaTensor
-        LoadImaged(keys=keys, fs=fs),
+        LoadImaged(keys=keys, config=config, fs=fs),
 
         # Redact: shared pixel-level PHI detection (OCR + NER)
         RedactPixelPHId(keys=keys, config=config),
 
         # Save: channel-first → HWC → output image
         SaveImaged(keys=keys, output_dir=output_dir, output_ext=output_ext, fs=fs),
+    ])
+
+
+def build_image_series_pipeline(
+    config_path: str = '../config/config.yaml',
+    output_dir: str = './output',
+    output_ext: str = '.png',
+) -> Compose:
+    """Build the pipeline for a folder of standard images (JPEGs/PNGs).
+
+    1. Load a folder of uniform images into a (C, D, H, W) volume.
+    2. Detect/redact PHI via Keyframe Strategy.
+    3. Save (D) slices to disk under the folder identity token.
+
+    Args:
+        config_path: Path to the YAML configuration file.
+        output_dir: Base directory for de-identified output.
+        output_ext: Extension for saved files.
+
+    Returns:
+        A composed MONAI transform pipeline.
+    """
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    if not os.path.isabs(config_path):
+        config_path = os.path.join(base_dir, config_path)
+
+    config = load_config(config_path)
+
+    fs = AegisFileSystem.from_config(config)
+
+    keys = ['image']
+
+    return Compose([
+        # Ingestion: Load a standard image folder into a volume (C, D, H, W)
+        LoadImageSeriesd(keys=keys, config=config, fs=fs),
+
+        # Logic: Keyframe OCR + pixel redaction
+        RedactPixelPHId(keys=keys, config=config),
+
+        # Output: Slice volume back into Token folder / Original Name
+        SaveImageSeriesd(keys=keys, output_dir=output_dir, output_ext=output_ext, fs=fs),
     ])

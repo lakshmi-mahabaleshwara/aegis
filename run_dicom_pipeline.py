@@ -16,6 +16,7 @@ import sys
 import argparse
 import shutil
 import logging
+from datetime import datetime
 
 from transforms.pipeline import build_pipeline, build_series_pipeline
 from transforms.discovery import (
@@ -39,8 +40,12 @@ def run_single(config_path: str) -> None:
     config = load_config(config_path)
     paths = config.get('paths', {})
     input_dir = paths.get('input_dir', 'staging_input')
-    output_dir = paths.get('output_dir', 'staging_output')
+    base_output_dir = paths.get('output_dir', 'staging_output')
     not_processed_dir = paths.get('not_processed_dir', 'staging_not_processed')
+    dicom_folder = paths.get('dicom_folder', 'dicom')
+
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    output_dir = os.path.join(base_output_dir, dicom_folder, today_str)
 
     config_path = os.path.abspath(config_path)
     os.makedirs(output_dir, exist_ok=True)
@@ -107,8 +112,12 @@ def run_series(config_path: str) -> None:
     config = load_config(config_path)
     paths = config.get('paths', {})
     input_dir = paths.get('input_dir', 'staging_input')
-    output_dir = paths.get('output_dir', 'staging_output')
+    base_output_dir = paths.get('output_dir', 'staging_output')
     not_processed_dir = paths.get('not_processed_dir', 'staging_not_processed')
+    dicom_folder = paths.get('dicom_folder', 'dicom')
+
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    output_dir = os.path.join(base_output_dir, dicom_folder, today_str)
 
     config_path = os.path.abspath(config_path)
     os.makedirs(output_dir, exist_ok=True)
@@ -133,7 +142,10 @@ def run_series(config_path: str) -> None:
     pipeline = build_series_pipeline(
         config_path=config_path, output_dir=output_dir, input_dir=input_dir,
     )
-    logger.info("Series pipeline ready.")
+    pipeline_single = build_pipeline(
+        config_path=config_path, output_dir=output_dir,
+    )
+    logger.info("Series pipelines ready.")
 
     series_count = 0
     total_slices = 0
@@ -155,14 +167,33 @@ def run_series(config_path: str) -> None:
                 label, len(filepaths), study_uid[:8],
             )
 
+            if len(filepaths) == 1:
+                filename = os.path.basename(filepaths[0])
+                logger.info("Routing singleton DICOM %s to single-file mode.", filename)
+                try:
+                    result = pipeline_single({'image': filepaths[0]})
+                    stats = result.get('image_redaction_stats', {})
+                    if stats.get('low_confidence_count', 0) > 0:
+                        dest = os.path.join(not_processed_dir, filename)
+                        shutil.copy2(filepaths[0], dest)
+                    total_slices += 1
+                except Exception as e:
+                    logger.error("Error processing series %s: %s", label, e, exc_info=True)
+                    errors += 1
+                continue
+
             try:
                 result = pipeline({'image': filepaths})
 
                 stats = result.get('image_redaction_stats', {})
                 strategy = stats.get('volume_strategy', 'unknown')
+                target_token = result.get('image_target_token')
+                
+                out_msg = f"Token: {target_token}" if target_token else "Original structure"
+                
                 logger.info(
-                    "Series %s complete: strategy=%s, redacted=%d",
-                    label, strategy, stats.get('redacted_count', 0),
+                    "Series %s complete: strategy=%s, redacted=%d | Output: %s",
+                    label, strategy, stats.get('redacted_count', 0), out_msg
                 )
 
                 series_count += 1

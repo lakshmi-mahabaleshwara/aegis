@@ -2,13 +2,13 @@
 Aegis Utility — AegisIdentityManager
 
 Deterministic identity tokenization for de-identification.
-Generates reproducible SHA-256 tokens for PII values, enabling
+Generates reproducible SHA-256 tokens for PII values or raw bytes, enabling
 re-identification when the salt is preserved.
 """
 import hashlib
 import logging
 import os
-from typing import Optional
+from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,7 @@ class AegisIdentityManager:
             )
 
         self._cache: dict[str, str] = {}
+        self._bytes_cache: dict[bytes, str] = {}
         logger.info("AegisIdentityManager initialized (salt configured: %s)",
                      self.salt != self._DEFAULT_SALT)
 
@@ -116,6 +117,28 @@ class AegisIdentityManager:
         data = f"{value}{self.salt}".encode("utf-8")
         token = f"TOKEN_{hashlib.sha256(data).hexdigest()[:16]}"
         self._cache[value] = token
+        return token
+
+    def get_token_from_bytes(self, data: bytes) -> str:
+        """Generate a consistent token from raw file bytes.
+
+        Used for the 'Loose Flow' to fingerprint non-DICOM standard images.
+
+        Args:
+            data: Raw binary bytes of the file.
+
+        Returns:
+            A shortened hash token string prefixed with ``TOKEN_``.
+        """
+        if not data:
+            return ""
+
+        if data in self._bytes_cache:
+            return self._bytes_cache[data]
+
+        salt_bytes = self.salt.encode("utf-8")
+        token = f"TOKEN_{hashlib.sha256(data + salt_bytes).hexdigest()[:16]}"
+        self._bytes_cache[data] = token
         return token
 
     @property

@@ -20,6 +20,7 @@ setup(
         "numpy>=1.21.0",
         "pyyaml>=6.0",
         "pillow>=9.0.0",
+        "transformers>=4.0.0",
     ],
     extras_require={
         "dev": [

@@ -405,27 +405,32 @@ class LoadImaged(MapTransform):
 
     Dictionary-based wrapper of :py:class:`LoadImage`.
     Thread-safe — stateless file reading only.
+    Also handles Identity Tokenization for standard files.
 
     Args:
         keys: Keys whose values are file paths to load.
+        config: Configuration dict (used for tokenization salt).
         allow_missing_keys: If True, skip missing keys instead of raising.
         fs: Optional :py:class:`AegisFileSystem` for cloud I/O.
 
     Example::
 
-        transform = LoadImaged(keys=["image"])
+        transform = LoadImaged(keys=["image"], config=config)
         data = transform({"image": "/path/to/file.jpg"})
     """
 
     def __init__(
         self,
         keys: KeysCollection,
+        config: Dict[str, Any],
         allow_missing_keys: bool = False,
         fs: Optional['AegisFileSystem'] = None,
     ) -> None:
         super().__init__(keys, allow_missing_keys)
         self.transform = LoadImage()
         self.fs = fs
+        from transforms.utility import AegisIdentityManager
+        self.identity_manager = AegisIdentityManager.from_config(config)
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
         """Load each keyed file path into a MetaTensor.
@@ -443,6 +448,19 @@ class LoadImaged(MapTransform):
         for key in self.key_iterator(d):
             filepath = str(d[key])
             try:
+                # 1. Read raw bytes directly for Fingerprint Token Generation
+                if self.fs is not None:
+                    with self.fs.open_read(filepath) as f:
+                        raw_bytes = f.read()
+                else:
+                    with open(filepath, 'rb') as f:
+                        raw_bytes = f.read()
+                
+                # Fingerprint token based on image contents
+                target_token = self.identity_manager.get_token_from_bytes(raw_bytes)
+                d[f"{key}_target_token"] = target_token
+                
+                # 2. Proceed with normal loading
                 meta_tensor = self.transform(filepath, fs=self.fs)
                 d[key] = meta_tensor
                 d[f"{key}_meta_dict"] = meta_tensor.meta
@@ -512,7 +530,10 @@ class SaveImage(Transform):
             else:
                 img_array = img_array.astype(np.uint8)
 
-        # Build output path (preserve original name, change ext if needed)
+        # Build output path (use target_token if passed, otherwise original name)
+        # Note: Since SaveImaged is a map transform, the actual target token logic
+        # is injected in SaveImaged.__call__.  If called directly, SaveImage preserves 
+        # original name or requires an overriding filepath.
         if self.fs is not None:
             basename = self.fs.basename(filepath)
         else:
@@ -587,6 +608,11 @@ class SaveImaged(MapTransform, ThreadUnsafe):
                 fpath = fpath[0]
             if not fpath:
                 continue
+
+            # Override filename if a target token exists securely generated upstream
+            target_token = d.get(f"{key}_target_token")
+            if target_token:
+                fpath = fpath.replace(os.path.basename(fpath), target_token + ".fake_ext")
 
             out_path = self.saver(tensor=tensor, filepath=fpath)
             d[f"{key}_saved_path"] = out_path

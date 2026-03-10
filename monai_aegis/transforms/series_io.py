@@ -225,14 +225,17 @@ class LoadDicomSeriesd(MapTransform):
     (output of :py:func:`discover_dicoms` + :py:func:`sort_slices`).
 
     Thread-safe — stateless file reading only.
+    Also handles Identity Tokenization for the series.
 
     Args:
         keys: Keys whose values are lists of sorted file paths.
+        config: Configuration dict (used for tokenization salt).
         allow_missing_keys: If True, skip missing keys instead of raising.
+        fs: Optional :py:class:`AegisFileSystem` for cloud I/O.
 
     Example::
 
-        transform = LoadDicomSeriesd(keys=["image"])
+        transform = LoadDicomSeriesd(keys=["image"], config=config)
         data = transform({"image": ["/path/slice1.dcm", "/path/slice2.dcm"]})
         # data["image"].shape → (1, 2, 512, 512)
     """
@@ -240,12 +243,15 @@ class LoadDicomSeriesd(MapTransform):
     def __init__(
         self,
         keys: KeysCollection,
+        config: Dict[str, Any],
         allow_missing_keys: bool = False,
         fs: Optional['AegisFileSystem'] = None,
     ) -> None:
         super().__init__(keys, allow_missing_keys)
         self.transform = LoadDicomSeries()
         self.fs = fs
+        from transforms.utility import AegisIdentityManager
+        self.identity_manager = AegisIdentityManager.from_config(config)
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
         """Load each keyed list of file paths into a volume MetaTensor.
@@ -285,6 +291,19 @@ class LoadDicomSeriesd(MapTransform):
                 meta_tensor = self.transform(filepaths, datasets=datasets, fs=self.fs)
                 d[key] = meta_tensor
                 d[f"{key}_meta_dict"] = meta_tensor.meta
+                
+                # Fingerprint Series based on StudyInstanceUID or Parent Folder
+                study_uid = meta_tensor.meta.get('study_instance_uid')
+                if not study_uid:
+                    # Fallback to parent folder if StudyUID is missing
+                    if self.fs is not None:
+                        study_uid = self.fs.basename(self.fs.dirname(filepaths[0]))
+                    else:
+                        study_uid = os.path.basename(os.path.dirname(filepaths[0]))
+                        
+                target_token = self.identity_manager.get_token(study_uid)
+                d[f"{key}_target_token"] = target_token
+                
             except SeriesLoadError:
                 raise
             except Exception as e:
@@ -323,16 +342,18 @@ class SaveDicomSeries(Transform):
         self,
         datasets: List[pydicom.Dataset],
         original_filepaths: List[str],
+        target_token: Optional[str] = None,
     ) -> List[str]:
         """Save a list of scrubbed datasets as individual DICOM files.
 
-        Output paths mirror the original input structure::
-
-            input_dir/sub/slice.dcm  →  output_dir/sub/slice.dcm
+        Output paths mirror the original input structure unless a
+        ``target_token`` is provided, which forces the output folder to be
+        just the token (ignoring original folder structure).
 
         Args:
             datasets: Scrubbed pydicom Datasets (one per slice).
             original_filepaths: Original input file paths (one per slice).
+            target_token: Optional enforced output subdirectory name across all slices.
 
         Returns:
             List of output file paths.
@@ -345,8 +366,15 @@ class SaveDicomSeries(Transform):
             # Regenerate SOPInstanceUID for uniqueness
             ds.SOPInstanceUID = pydicom.uid.generate_uid()
 
-            # Preserve original folder + filename
-            if self.input_dir:
+            # Format the output tree name
+            if target_token:
+                if self.fs is not None:
+                    basename = self.fs.basename(orig_fp)
+                    rel_path = self.fs.join(target_token, basename)
+                else:
+                    basename = os.path.basename(orig_fp)
+                    rel_path = os.path.join(target_token, basename)
+            elif self.input_dir:
                 if self.fs is not None:
                     rel_path = self.fs.relpath(orig_fp, self.input_dir)
                 else:
@@ -449,6 +477,7 @@ class SaveDicomSeriesd(MapTransform, ThreadUnsafe):
                 self.saver(
                     datasets=scrubbed_list,
                     original_filepaths=original_filepaths,
+                    target_token=d.get(f"{key}_target_token"),
                 )
             except SeriesSaveError:
                 raise
