@@ -20,19 +20,10 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **Stanford NER-based PHI detection** — semantic classification via `stanford-deidentifier-base` (F1 ≥ 97.9%)
 - **3-layer classification pipeline**: clinical allowlist → PHI heuristics → NER model
 - **EasyOCR-based text detection** with configurable confidence thresholds
-- **Thread-safe** OCR + NER via `threading.local()` — safe for `DataLoader(num_workers > 0)`
 - **Regex safelist fallback** — preserved for environments without NER model
 - **Low-confidence routing** — images with uncertain OCR are flagged for manual review
 - **InvertibleTransform** — redaction mask tracked through MONAI's transform history for spatial consistency
 - **Fully configurable** — PHI labels, clinical allowlist, clinical patterns, and PHI heuristics all defined in `config.yaml`
-
-### Series-Aware Volume Processing
-- **DICOM series discovery** — recursive scanning, Study/Series grouping, geometry validation
-- **Volume loading** — series loaded as `(C, D, H, W)` tensors (multi-file + multi-frame DICOM)
-- **Keyframe OCR** — samples first/middle/last slices; unified mask or slice-by-slice fallback
-- **Geometry preservation** — `PixelSpacing`, `SliceThickness`, `ImageOrientationPatient`, `ImagePositionPatient` protected during scrubbing
-- **SOPInstanceUID regeneration** — unique UIDs per output slice
-- **Original path preservation** — output folder/file names mirror input structure
 
 ### Separate Pipeline Architecture
 - **DICOM pipeline** (`run_dicom_pipeline.py`) — DICOM single-file or series-aware volume mode
@@ -49,7 +40,6 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **Configurable PII mapping** with REMOVE / DUMMY / ZERO actions
 - **Deterministic tokenization** for patient identifiers (enables re-identification if needed)
 - **Private tag removal** for enhanced privacy
-- **Pure in-memory scrubbing** — no file I/O during transformation
 
 ### Pipeline Architecture
 - **MONAI-compliant transforms** — array + dictionary variants, `MetaTensor` propagation
@@ -59,267 +49,6 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **Safety lock** — warns when prior spatial transforms may compromise OCR accuracy
 - **Thread-safe by design** — only save transforms are `ThreadUnsafe`
 - **Non-destructive** — input files remain unchanged
-
----
-
-## 📦 Installation
-
-### Prerequisites
-- Python 3.8+
-- Virtual environment recommended
-
-### Install Package
-```bash
-git clone <repo-url>
-cd aegis
-
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-pip install -e monai_aegis/
-```
-
----
-
-## 🚀 Quick Start
-
-### Python API
-```python
-from transforms.pipeline import build_pipeline, build_series_pipeline, build_image_pipeline
-
-# === DICOM single-file mode ===
-pipeline = build_pipeline(
-    config_path='monai_aegis/config/config.yaml',
-    output_dir='staging_output'
-)
-result = pipeline({'image': 'staging_input/scan.dcm'})
-
-# === DICOM series-aware mode ===
-series_pipeline = build_series_pipeline(
-    config_path='monai_aegis/config/config.yaml',
-    output_dir='staging_output',
-    input_dir='staging_input'
-)
-result = series_pipeline({'image': ['path/slice1.dcm', 'path/slice2.dcm', ...]})
-
-# === Image mode (single JPEG/PNG) ===
-image_pipeline = build_image_pipeline(
-    config_path='monai_aegis/config/config.yaml',
-    output_dir='staging_output'
-)
-result = image_pipeline({'image': 'staging_input/photo.jpg'})
-
-# === Image series mode (folder of JPEG/PNG) ===
-from transforms.pipeline import build_image_series_pipeline
-img_series_pipeline = build_image_series_pipeline(
-    config_path='monai_aegis/config/config.yaml',
-    output_dir='staging_output'
-)
-result = img_series_pipeline({'image': ['path/img1.png', 'path/img2.png']})
-```
-
-### Command-Line Runners
-```bash
-# DICOM pipeline — series mode (default)
-PYTHONPATH=monai_aegis python run_dicom_pipeline.py --config monai_aegis/config/config.yaml
-
-# DICOM pipeline — single-file mode
-PYTHONPATH=monai_aegis python run_dicom_pipeline.py --config monai_aegis/config/config.yaml --mode single
-
-# Image pipeline — series mode (default)
-PYTHONPATH=monai_aegis python run_image_pipeline.py --config monai_aegis/config/config.yaml
-
-# Image pipeline — single-file mode
-PYTHONPATH=monai_aegis python run_image_pipeline.py --config monai_aegis/config/config.yaml --mode single
-
-# Unified orchestrator — runs both DICOM and Image pipelines
-PYTHONPATH=monai_aegis python run_pipeline.py --config monai_aegis/config/config.yaml --mode auto
-
-# Output:
-#   Processed files → staging_output/dicom/YYYY-MM-DD/ or staging_output/image/YYYY-MM-DD/
-#   Low-confidence files → staging_not_processed/ (manual review)
-```
-
----
-
-## ⚙️ Configuration
-
-Edit `monai_aegis/config/config.yaml`. Supports `${VAR_NAME:default}` environment variable interpolation:
-
-```yaml
-paths:
-  input_dir: '${AEGIS_INPUT_DIR:staging_input}'
-  output_dir: '${AEGIS_OUTPUT_DIR:staging_output}'
-  not_processed_dir: '${AEGIS_REVIEW_DIR:staging_not_processed}'
-
-storage:
-  protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file, s3, gs, az
-  options: {}                                   # fsspec options (credentials, etc.)
-
-series:
-  enabled: true
-  accepted_modalities: ['CT', 'MR', 'US', 'CR', 'DX', 'MG', 'PT', 'XA', 'RF', 'OT']
-  keyframe_count: 3
-  output_structure: 'hierarchical'
-
-ocr:
-  languages: ['en']
-  gpu_usage: false
-  confidence_threshold: 0.4
-
-ner:
-  enabled: true                   # Set false to fall back to regex safelist
-  model_name: 'StanfordAIMI/stanford-deidentifier-base'
-  device: '${AEGIS_DEVICE:cpu}'   # 'cpu', 'cuda', or 'mps'
-  phi_labels:                     # NER entity types treated as PHI
-    - PATIENT
-    - DOCTOR
-    - HOSPITAL
-    - DATE
-    - IDNUM
-    # ... (22 labels total)
-  clinical_allowlist:             # Terms never redacted
-    - mindray
-    - ge
-    - adult abd n
-    # ... (device manufacturers, imaging modes)
-  clinical_patterns:              # Regex for clinical/technical text (preserved)
-    - '^(F\s*H?\d|D\s+\d|G\s+\d|FR\s+\d|DR\s+\d)'
-    - '^(AP|MI|TIS|SSI)\s+\d'
-    # ... (probe IDs, measurements, exam types)
-  phi_heuristic_patterns:         # Regex for PHI in short OCR fragments (redacted)
-    - '^\d{8}[-/]\d{6}[-/]?\w*$'  # Date-ID combos
-    - '(?i)(hospital|clinic|diagnostic|medical)'
-    # ... (dates, doctor names, patient IDs)
-
-pii_mapping:
-  '(0010, 0010)': 'DUMMY'   # PatientName → TOKEN_xxxxx
-  '(0010, 0020)': 'DUMMY'   # PatientID → TOKEN_xxxxx
-  '(0010, 0030)': 'REMOVE'  # PatientBirthDate → removed
-  '(0008, 0020)': 'ZERO'    # StudyDate → 00000000
-  '(0008, 0050)': 'REMOVE'  # AccessionNumber → removed
-```
-
-### Cloud Storage (S3 / GCS / Azure)
-
-```yaml
-# config.prod.yaml — overlay for cloud deployment
-storage:
-  protocol: 's3'
-  options:
-    key: '${AWS_ACCESS_KEY_ID}'
-    secret: '${AWS_SECRET_ACCESS_KEY}'
-
-paths:
-  input_dir: 's3://my-bucket/incoming'
-  output_dir: 's3://my-bucket/deidentified'
-```
-
-```bash
-# Apply overlay via environment variable
-export AEGIS_CONFIG_OVERRIDE=config.prod.yaml
-pip install s3fs  # one-time
-PYTHONPATH=monai_aegis python run_dicom_pipeline.py
-```
-
-| Backend | Protocol | Extra Package |
-|---------|----------|---------------|
-| Local   | `file`   | (built-in)    |
-| AWS S3  | `s3`     | `s3fs`        |
-| GCS     | `gs`     | `gcsfs`       |
-| Azure   | `az`     | `adlfs`       |
-
-### NER Classification Pipeline
-
-When `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline:
-
-| Layer | Source | Action | Example |
-|-------|--------|--------|---------|
-| 1. Clinical allowlist | `ner.clinical_allowlist` | **Preserve** | `mindray`, `adult abd n` |
-| 2. Clinical patterns | `ner.clinical_patterns` | **Preserve** | `FH5.0`, `D 13.0`, `SC5-1N` |
-| 3. PHI heuristics | `ner.phi_heuristic_patterns` | **Redact** | `SKANDA DIAGNOSTIC CENTRE`, `20260117-091825-6AAA` |
-| 4. Stanford NER | `ner.phi_labels` | **Redact if PHI** | Names, remaining identifiers |
-
-### PII Mapping Actions
-| Action | Behavior | Example |
-|--------|----------|---------|
-| `DUMMY` | Replace with deterministic hash token | `John Doe` → `TOKEN_a1b2c3d4e5f6` |
-| `REMOVE` | Delete the DICOM tag entirely | Tag removed from dataset |
-| `ZERO` | Set to zero / empty value | `20250216` → `00000000` |
-
----
-
-## 🧪 Testing
-
-```bash
-# Run all 97 unit tests
-PYTHONPATH=monai_aegis python -m unittest discover tests/unit -v
-
-# Run integration tests
-PYTHONPATH=monai_aegis python -m unittest discover tests/integration -v
-```
-
-### Test Coverage (97 tests across 13 test files)
-| Module | Tests |
-|--------|-------|
-| `RedactPixelPHI` / `RedactPixelPHId` | Visual redaction, safelist, shape preservation, invertibility, spatial transform safety warning |
-| `RedactPixelPHId` (MONAI compliance) | Inherits `MapTransform` + `InvertibleTransform`, cooperative `super().__init__()`, invertible methods |
-| `RedactPixelPHI` (Volume) | 4D shape preservation, keyframe OCR stats, strategy selection, small-volume keyframe fallback |
-| `PHIClassifier` | PHI detection, clinical preservation, empty text, mixed inputs, config loading, error defaults |
-| `detect_text` / `apply_redaction` | OCR detection, confidence filtering, redaction, NER integration, safelist fallback |
-| `ScrubDicomMetadata` / `ScrubDicomMetadatad` | Tag scrubbing, no-I/O assertion, orientation, cached dataset usage |
-| `LoadDicomRawd` | DICOM loading, enriched metadata propagation, dataset caching, `MetaTensor.meta` reference sync |
-| `LoadImaged` | JPEG/PNG loading, channel-first shape, grayscale, metadata |
-| `LoadDicomSeries` / `LoadDicomSeriesd` | Multi-file volume loading, empty input error, dictionary transform |
-| `SaveDicomSeries` | Series saving with path preservation and SOPInstanceUID regeneration |
-| `discover_dicoms`, `group_into_series` | Recursive scanning, modality filtering, Study/Series grouping |
-| `validate_series`, `sort_slices` | Geometry validation, sub-series splitting, IPP/InstanceNumber/filename sorting |
-| `AegisFileSystem` | Local/memory filesystem, walk, exists, from_config factory, pydicom byte-stream round-trip |
-| `load_config` | Env var interpolation, defaults, overlay merging, edge cases |
-| Exception handling | Hierarchy, context propagation, corrupted DICOM/JPEG, missing files, write failures |
-
----
-
-## 📁 Project Structure
-
-```
-aegis/
-├── monai_aegis/                      # Installable package
-│   ├── pyproject.toml                # PEP 621 package config
-│   ├── config/
-│   │   ├── config.yaml               # De-identification + NER + storage + series settings
-│   │   ├── config_loader.py          # Env var interpolation + overlay merging
-│   │   └── storage.py                # AegisFileSystem (fsspec wrapper)
-│   └── transforms/
-│       ├── __init__.py                # Public API exports
-│       ├── io.py                      # LoadDicomRaw/d, SaveDicom/d, LoadImage/d, SaveImage/d
-│       ├── series_io.py               # LoadDicomSeries/d, SaveDicomSeries/d
-│       ├── discovery.py               # discover_dicoms, group/validate/sort
-│       ├── pixel.py                   # RedactPixelPHI/d (OCR + NER + volume keyframe)
-│       ├── ner_classifier.py          # PHIClassifier (Stanford NER wrapper)
-│       ├── metadata.py                # ScrubDicomMetadata/d (single + series scrub)
-│       ├── exceptions.py              # Custom exception hierarchy
-│       ├── utility.py                 # AegisIdentityManager (tokenization)
-│       └── pipeline.py                # build_pipeline / build_series_pipeline / build_image_pipeline
-├── tests/
-│   ├── unit/                          # 97 unit tests (13 test files)
-│   │   ├── test_config_loader.py      # Config loading, env vars, overlays
-│   │   ├── test_storage.py            # AegisFileSystem, fsspec, byte-stream round-trip
-│   │   ├── test_raw_loader.py         # DICOM + image loading transforms
-│   │   ├── test_discovery.py          # Discovery, grouping, validation, sorting
-│   │   ├── test_series_io.py          # Series load/save transforms
-│   │   ├── test_volume_redaction.py   # Volume keyframe OCR
-│   │   └── ...                        # Additional test files
-│   └── integration/                   # End-to-end tests
-├── run_dicom_pipeline.py              # DICOM pipeline entry point (--mode single|series)
-├── run_image_pipeline.py              # Image pipeline entry point (JPEG/PNG)
-├── run_pipeline.py                    # Unified orchestrator (--mode auto|dicom|image)
-├── de-identification.ipynb            # Interactive walkthrough notebook
-├── Dockerfile                         # Container build
-├── staging_input/                     # Input files (not tracked)
-├── staging_output/                    # Processed output (not tracked)
-└── staging_not_processed/             # Low-confidence files for review (not tracked)
-```
 
 ---
 
@@ -514,6 +243,216 @@ The pipeline is intentionally designed around multithreading bottlenecks and fil
 | `ScrubDicomMetadatad` | `MapTransform` | Pure in-memory; geometry-preserving series scrub | — | ✅ Safe |
 | `SaveDicomd` | `MapTransform`, `ThreadUnsafe` | File I/O | — | ⚠️ Main thread sequential write |
 | `SaveDicomSeriesd` | `MapTransform`, `ThreadUnsafe` | Series file I/O, path-preserving | — | ⚠️ Main thread sequential write |
+
+---
+
+## 📦 Installation
+
+### Prerequisites
+- Python 3.8+
+- Virtual environment recommended
+
+### Install Package
+```bash
+git clone <repo-url>
+cd aegis
+
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+pip install -e monai_aegis/
+```
+
+---
+
+## 🚀 Quick Start
+
+### Command-Line Runners
+```bash
+# DICOM pipeline — series mode (default)
+PYTHONPATH=monai_aegis python run_dicom_pipeline.py --config monai_aegis/config/config.yaml
+
+# DICOM pipeline — single-file mode
+PYTHONPATH=monai_aegis python run_dicom_pipeline.py --config monai_aegis/config/config.yaml --mode single
+
+# Image pipeline — series mode (default)
+PYTHONPATH=monai_aegis python run_image_pipeline.py --config monai_aegis/config/config.yaml
+
+# Image pipeline — single-file mode
+PYTHONPATH=monai_aegis python run_image_pipeline.py --config monai_aegis/config/config.yaml --mode single
+
+# Unified orchestrator — runs both DICOM and Image pipelines
+PYTHONPATH=monai_aegis python run_pipeline.py --config monai_aegis/config/config.yaml --mode auto
+
+# Output:
+#   Processed files → staging_output/dicom/YYYY-MM-DD/ or staging_output/image/YYYY-MM-DD/
+#   Low-confidence files → staging_not_processed/ (manual review)
+```
+
+---
+
+## ⚙️ Configuration
+
+Edit `monai_aegis/config/config.yaml`. Supports `${VAR_NAME:default}` environment variable interpolation:
+
+```yaml
+paths:
+  input_dir: '${AEGIS_INPUT_DIR:staging_input}'
+  output_dir: '${AEGIS_OUTPUT_DIR:staging_output}'
+  not_processed_dir: '${AEGIS_REVIEW_DIR:staging_not_processed}'
+
+storage:
+  protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file, s3, gs, az
+  options: {}                                   # fsspec options (credentials, etc.)
+
+series:
+  enabled: true
+  accepted_modalities: ['CT', 'MR', 'US', 'CR', 'DX', 'MG', 'PT', 'XA', 'RF', 'OT']
+  keyframe_count: 3
+  output_structure: 'hierarchical'
+
+ocr:
+  languages: ['en']
+  gpu_usage: false
+  confidence_threshold: 0.4
+
+ner:
+  enabled: true                   # Set false to fall back to regex safelist
+  model_name: 'StanfordAIMI/stanford-deidentifier-base'
+  device: '${AEGIS_DEVICE:cpu}'   # 'cpu', 'cuda', or 'mps'
+  phi_labels:                     # NER entity types treated as PHI
+    - PATIENT
+    - DOCTOR
+    - HOSPITAL
+    - DATE
+    - IDNUM
+    # ... (22 labels total)
+  clinical_allowlist:             # Terms never redacted
+    - mindray
+    - ge
+    - adult abd n
+    # ... (device manufacturers, imaging modes)
+  clinical_patterns:              # Regex for clinical/technical text (preserved)
+    - '^(F\s*H?\d|D\s+\d|G\s+\d|FR\s+\d|DR\s+\d)'
+    - '^(AP|MI|TIS|SSI)\s+\d'
+    # ... (probe IDs, measurements, exam types)
+  phi_heuristic_patterns:         # Regex for PHI in short OCR fragments (redacted)
+    - '^\d{8}[-/]\d{6}[-/]?\w*$'  # Date-ID combos
+    - '(?i)(hospital|clinic|diagnostic|medical)'
+    # ... (dates, doctor names, patient IDs)
+
+pii_mapping:
+  '(0010, 0010)': 'DUMMY'   # PatientName → TOKEN_xxxxx
+  '(0010, 0020)': 'DUMMY'   # PatientID → TOKEN_xxxxx
+  '(0010, 0030)': 'REMOVE'  # PatientBirthDate → removed
+  '(0008, 0020)': 'ZERO'    # StudyDate → 00000000
+  '(0008, 0050)': 'REMOVE'  # AccessionNumber → removed
+```
+
+### Cloud Storage (S3 / GCS / Azure)
+
+```yaml
+# config.prod.yaml — overlay for cloud deployment
+storage:
+  protocol: 's3'
+  options:
+    key: '${AWS_ACCESS_KEY_ID}'
+    secret: '${AWS_SECRET_ACCESS_KEY}'
+
+paths:
+  input_dir: 's3://my-bucket/incoming'
+  output_dir: 's3://my-bucket/deidentified'
+```
+
+```bash
+# Apply overlay via environment variable
+export AEGIS_CONFIG_OVERRIDE=config.prod.yaml
+pip install s3fs  # one-time
+PYTHONPATH=monai_aegis python run_dicom_pipeline.py
+```
+
+| Backend | Protocol | Extra Package |
+|---------|----------|---------------|
+| Local   | `file`   | (built-in)    |
+| AWS S3  | `s3`     | `s3fs`        |
+| GCS     | `gs`     | `gcsfs`       |
+| Azure   | `az`     | `adlfs`       |
+
+### NER Classification Pipeline
+
+When `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline:
+
+| Layer | Source | Action | Example |
+|-------|--------|--------|---------|
+| 1. Clinical allowlist | `ner.clinical_allowlist` | **Preserve** | `mindray`, `adult abd n` |
+| 2. Clinical patterns | `ner.clinical_patterns` | **Preserve** | `FH5.0`, `D 13.0`, `SC5-1N` |
+| 3. PHI heuristics | `ner.phi_heuristic_patterns` | **Redact** | `20260117-091825-6AAA` |
+| 4. Stanford NER | `ner.phi_labels` | **Redact if PHI** | Names, remaining identifiers |
+
+### PII Mapping Actions
+| Action | Behavior | Example |
+|--------|----------|---------|
+| `DUMMY` | Replace with deterministic hash token | `John Doe` → `TOKEN_a1b2c3d4e5f6` |
+| `REMOVE` | Delete the DICOM tag entirely | Tag removed from dataset |
+| `ZERO` | Set to zero / empty value | `20250216` → `00000000` |
+
+---
+
+## 🧪 Testing
+
+```bash
+# Run all 97 unit tests
+PYTHONPATH=monai_aegis python -m unittest discover tests/unit -v
+
+# Run integration tests
+PYTHONPATH=monai_aegis python -m unittest discover tests/integration -v
+```
+
+
+---
+
+## 📁 Project Structure
+
+```
+aegis/
+├── monai_aegis/                      # Installable package
+│   ├── pyproject.toml                # PEP 621 package config
+│   ├── config/
+│   │   ├── config.yaml               # De-identification + NER + storage + series settings
+│   │   ├── config_loader.py          # Env var interpolation + overlay merging
+│   │   └── storage.py                # AegisFileSystem (fsspec wrapper)
+│   └── transforms/
+│       ├── __init__.py                # Public API exports
+│       ├── io.py                      # LoadDicomRaw/d, SaveDicom/d, LoadImage/d, SaveImage/d
+│       ├── series_io.py               # LoadDicomSeries/d, SaveDicomSeries/d
+│       ├── discovery.py               # discover_dicoms, group/validate/sort
+│       ├── pixel.py                   # RedactPixelPHI/d (OCR + NER + volume keyframe)
+│       ├── ner_classifier.py          # PHIClassifier (Stanford NER wrapper)
+│       ├── metadata.py                # ScrubDicomMetadata/d (single + series scrub)
+│       ├── exceptions.py              # Custom exception hierarchy
+│       ├── utility.py                 # AegisIdentityManager (tokenization)
+│       └── pipeline.py                # build_pipeline / build_series_pipeline / build_image_pipeline
+├── tests/
+│   ├── unit/                          # 97 unit tests (13 test files)
+│   │   ├── test_config_loader.py      # Config loading, env vars, overlays
+│   │   ├── test_storage.py            # AegisFileSystem, fsspec, byte-stream round-trip
+│   │   ├── test_raw_loader.py         # DICOM + image loading transforms
+│   │   ├── test_discovery.py          # Discovery, grouping, validation, sorting
+│   │   ├── test_series_io.py          # Series load/save transforms
+│   │   ├── test_volume_redaction.py   # Volume keyframe OCR
+│   │   └── ...                        # Additional test files
+│   └── integration/                   # End-to-end tests
+├── run_dicom_pipeline.py              # DICOM pipeline entry point (--mode single|series)
+├── run_image_pipeline.py              # Image pipeline entry point (JPEG/PNG)
+├── run_pipeline.py                    # Unified orchestrator (--mode auto|dicom|image)
+├── de-identification.ipynb            # Interactive walkthrough notebook
+├── Dockerfile                         # Container build
+├── staging_input/                     # Input files (not tracked)
+├── staging_output/                    # Processed output (not tracked)
+└── staging_not_processed/             # Low-confidence files for review (not tracked)
+```
+
+---
 
 ---
 
