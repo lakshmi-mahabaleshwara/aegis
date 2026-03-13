@@ -40,7 +40,7 @@ def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str =
         output_dir: Directory for de-identified output files.
 
     Returns:
-        A MONAI Compose pipeline ready for ``pipeline({"image": filepath})``.
+        A MONAI Compose pipeline ready for ``pipeline({"image": uri})``.
     """
     base_dir = os.path.dirname(os.path.abspath(__file__))
     if not os.path.isabs(config_path):
@@ -159,7 +159,7 @@ def build_image_pipeline(
         output_ext: Extension for output images (default ``'.png'``).
 
     Returns:
-        A MONAI Compose pipeline ready for ``pipeline({"image": filepath})``.
+        A MONAI Compose pipeline ready for ``pipeline({"image": uri})``.
     """
     base_dir = os.path.dirname(os.path.abspath(__file__))
     if not os.path.isabs(config_path):

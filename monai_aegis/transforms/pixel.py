@@ -422,11 +422,11 @@ class RedactPixelPHId(MapTransform, InvertibleTransform):
         """
         d = dict(data)
         for key in self.key_iterator(d):
-            # Extract filepath for error context
+            # Extract uri for error context
             meta = d.get(f"{key}_meta_dict", {})
-            filepath = meta.get('filename_or_obj', '<unknown>')
-            if isinstance(filepath, list):
-                filepath = filepath[0]
+            uri = meta.get('filename_or_obj', '<unknown>')
+            if isinstance(uri, list):
+                uri = uri[0]
 
             try:
                 input_tensor = d[key]
@@ -486,7 +486,7 @@ class RedactPixelPHId(MapTransform, InvertibleTransform):
             except Exception as e:
                 raise PixelRedactionError(
                     f"Pixel redaction failed: {e}",
-                    filepath=str(filepath),
+                    uri=str(uri),
                     transform="RedactPixelPHId",
                 ) from e
 

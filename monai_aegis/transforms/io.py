@@ -20,8 +20,7 @@ import torch
 import logging
 from typing import Dict, Hashable, Mapping, Any, Optional, Sequence, TYPE_CHECKING, Union
 
-if TYPE_CHECKING:
-    from config.storage import AegisFileSystem
+from config.storage import AegisFileSystem
 from PIL import Image
 from monai.config import KeysCollection
 from monai.transforms import Transform, MapTransform, ThreadUnsafe
@@ -68,14 +67,14 @@ class LoadDicomRaw(Transform):
 
     def __call__(
         self,
-        filepath: str,
+        uri: str,
         dataset: Optional[pydicom.Dataset] = None,
         fs: Optional['AegisFileSystem'] = None,
     ) -> MetaTensor:
         """Load a single file and return a channel-first MetaTensor.
 
         Args:
-            filepath: Absolute or relative path to the ``.dcm`` file.
+            uri: Absolute or relative path to the ``.dcm`` file.
             dataset: Pre-loaded pydicom Dataset (skips ``dcmread`` if provided).
             fs: Optional :py:class:`AegisFileSystem` for cloud-native I/O.
 
@@ -85,22 +84,21 @@ class LoadDicomRaw(Transform):
         Raises:
             DicomLoadError: If the file cannot be parsed.
         """
-        filepath = str(filepath)
+        uri = str(uri)
 
-        if filepath.lower().endswith('.dcm'):
+        if uri.lower().endswith('.dcm'):
             try:
                 if dataset is not None:
                     ds = dataset
-                elif fs is not None:
-                    with fs.open_read(filepath) as f:
-                        ds = pydicom.dcmread(f)
                 else:
-                    ds = pydicom.dcmread(filepath)
+                    _fs = fs if fs is not None else AegisFileSystem()
+                    with _fs.open_read(uri) as f:
+                        ds = pydicom.dcmread(f)
                 pixel_array = ds.pixel_array.astype(np.float32)
             except Exception as e:
                 raise DicomLoadError(
                     f"Failed to read DICOM: {e}",
-                    filepath=filepath,
+                    uri=uri,
                     transform="LoadDicomRaw",
                 ) from e
 
@@ -110,7 +108,7 @@ class LoadDicomRaw(Transform):
                 pixel_array = np.transpose(pixel_array, (2, 0, 1))  # (3, H, W)
 
             meta = {
-                'filename_or_obj': filepath,
+                'filename_or_obj': uri,
                 'spatial_shape': pixel_array.shape[1:],
                 'original_channel_dim': 0,
                 'modality': getattr(ds, 'Modality', ''),
@@ -167,20 +165,20 @@ class LoadDicomRawd(MapTransform):
         """
         d = dict(data)
         for key in self.key_iterator(d):
-            filepath = str(d[key])
+            uri = str(d[key])
             try:
                 ds = None
                 
                 # Read dataset once to keep it in memory
-                if filepath.lower().endswith('.dcm'):
+                if uri.lower().endswith('.dcm'):
                     if self.fs is not None:
-                        with self.fs.open_read(filepath) as f:
+                        with self.fs.open_read(uri) as f:
                             ds = pydicom.dcmread(f)
                     else:
-                        ds = pydicom.dcmread(filepath)
+                        ds = pydicom.dcmread(uri)
                     d[f"{key}_dicom_dataset"] = ds
                     
-                meta_tensor = self.transform(filepath, dataset=ds, fs=self.fs)
+                meta_tensor = self.transform(uri, dataset=ds, fs=self.fs)
                 d[key] = meta_tensor
 
                 # Alias MetaTensor.meta → {key}_meta_dict for backward compatibility.
@@ -190,7 +188,7 @@ class LoadDicomRawd(MapTransform):
             except Exception as e:
                 raise DicomLoadError(
                     f"Unexpected error loading file: {e}",
-                    filepath=filepath,
+                    uri=uri,
                     transform="LoadDicomRawd",
                 ) from e
         return d
@@ -215,7 +213,7 @@ class SaveDicom(Transform):
     Example::
 
         saver = SaveDicom(output_dir="./output")
-        saver(dataset=scrubbed_ds, filepath="/path/to/original.dcm")
+        saver(dataset=scrubbed_ds, uri="/path/to/original.dcm")
     """
 
     def __init__(self, output_dir: str, fs: Optional['AegisFileSystem'] = None):
@@ -227,19 +225,19 @@ class SaveDicom(Transform):
         else:
             os.makedirs(self.output_dir, exist_ok=True)
 
-    def __call__(self, dataset: pydicom.Dataset, filepath: str) -> str:
+    def __call__(self, dataset: pydicom.Dataset, uri: str) -> str:
         """
         Args:
             dataset: Scrubbed pydicom Dataset to save.
-            filepath: Original filepath (used to derive output filename).
+            uri: Original uri (used to derive output filename).
 
         Returns:
             Path to the saved file.
         """
         if self.fs is not None:
-            out_path = self.fs.join(self.output_dir, self.fs.basename(filepath))
+            out_path = self.fs.join(self.output_dir, self.fs.basename(uri))
         else:
-            out_path = os.path.join(self.output_dir, os.path.basename(filepath))
+            out_path = os.path.join(self.output_dir, os.path.basename(uri))
         try:
             if self.fs is not None:
                 with self.fs.open_write(out_path) as f:
@@ -249,7 +247,7 @@ class SaveDicom(Transform):
         except Exception as e:
             raise DicomSaveError(
                 f"Failed to save scrubbed DICOM: {e}",
-                filepath=out_path,
+                uri=out_path,
                 transform="SaveDicom",
             ) from e
         logger.info(f"Saved scrubbed DICOM to {out_path}")
@@ -313,7 +311,7 @@ class SaveDicomd(MapTransform, ThreadUnsafe):
             if scrubbed_ds is None:
                 continue
 
-            # Get original filepath for output filename
+            # Get original uri for output filename
             meta = d.get(f"{key}_meta_dict", {})
             fpath = meta.get('filename_or_obj')
             if isinstance(fpath, list):
@@ -322,13 +320,13 @@ class SaveDicomd(MapTransform, ThreadUnsafe):
                 continue
 
             try:
-                self.saver(dataset=scrubbed_ds, filepath=fpath)
+                self.saver(dataset=scrubbed_ds, uri=fpath)
             except DicomSaveError:
                 raise
             except Exception as e:
                 raise DicomSaveError(
                     f"Unexpected error saving DICOM: {e}",
-                    filepath=str(fpath),
+                    uri=str(fpath),
                     transform="SaveDicomd",
                 ) from e
 
@@ -356,13 +354,13 @@ class LoadImage(Transform):
 
     def __call__(
         self,
-        filepath: str,
+        uri: str,
         fs: Optional['AegisFileSystem'] = None,
     ) -> MetaTensor:
         """Load a single image file and return a channel-first MetaTensor.
 
         Args:
-            filepath: Path to ``.jpg``, ``.jpeg``, or ``.png`` file.
+            uri: Path to ``.jpg``, ``.jpeg``, or ``.png`` file.
             fs: Optional :py:class:`AegisFileSystem` for cloud I/O.
 
         Returns:
@@ -371,19 +369,19 @@ class LoadImage(Transform):
         Raises:
             ImageLoadError: If the image cannot be read.
         """
-        filepath = str(filepath)
+        uri = str(uri)
         try:
             if fs is not None:
-                with fs.open_read(filepath) as f:
+                with fs.open_read(uri) as f:
                     img = Image.open(f)
                     img.load()
             else:
-                img = Image.open(filepath)
+                img = Image.open(uri)
             pixel_array = np.array(img).astype(np.float32)
         except Exception as e:
             raise ImageLoadError(
                 f"Failed to read image: {e}",
-                filepath=filepath,
+                uri=uri,
                 transform="LoadImage",
             ) from e
 
@@ -393,7 +391,7 @@ class LoadImage(Transform):
             pixel_array = np.transpose(pixel_array[:, :, :3], (2, 0, 1))  # (3, H, W)
 
         meta = {
-            'filename_or_obj': filepath,
+            'filename_or_obj': uri,
             'spatial_shape': pixel_array.shape[1:],
             'original_channel_dim': 0,
         }
@@ -446,14 +444,14 @@ class LoadImaged(MapTransform):
         """
         d = dict(data)
         for key in self.key_iterator(d):
-            filepath = str(d[key])
+            uri = str(d[key])
             try:
                 # 1. Read raw bytes directly for Fingerprint Token Generation
                 if self.fs is not None:
-                    with self.fs.open_read(filepath) as f:
+                    with self.fs.open_read(uri) as f:
                         raw_bytes = f.read()
                 else:
-                    with open(filepath, 'rb') as f:
+                    with open(uri, 'rb') as f:
                         raw_bytes = f.read()
                 
                 # Fingerprint token based on image contents
@@ -461,7 +459,7 @@ class LoadImaged(MapTransform):
                 d[f"{key}_target_token"] = target_token
                 
                 # 2. Proceed with normal loading
-                meta_tensor = self.transform(filepath, fs=self.fs)
+                meta_tensor = self.transform(uri, fs=self.fs)
                 d[key] = meta_tensor
                 d[f"{key}_meta_dict"] = meta_tensor.meta
             except ImageLoadError:
@@ -469,7 +467,7 @@ class LoadImaged(MapTransform):
             except Exception as e:
                 raise ImageLoadError(
                     f"Unexpected error loading image: {e}",
-                    filepath=filepath,
+                    uri=uri,
                     transform="LoadImaged",
                 ) from e
         return d
@@ -504,12 +502,12 @@ class SaveImage(Transform):
         else:
             os.makedirs(output_dir, exist_ok=True)
 
-    def __call__(self, tensor: MetaTensor, filepath: str) -> str:
+    def __call__(self, tensor: MetaTensor, uri: str) -> str:
         """Save a redacted image.
 
         Args:
             tensor: Channel-first MetaTensor ``(C, H, W)`` to save.
-            filepath: Original filepath (used to derive output filename).
+            uri: Original uri (used to derive output filename).
 
         Returns:
             Path to the saved file.
@@ -533,11 +531,11 @@ class SaveImage(Transform):
         # Build output path (use target_token if passed, otherwise original name)
         # Note: Since SaveImaged is a map transform, the actual target token logic
         # is injected in SaveImaged.__call__.  If called directly, SaveImage preserves 
-        # original name or requires an overriding filepath.
+        # original name or requires an overriding uri.
         if self.fs is not None:
-            basename = self.fs.basename(filepath)
+            basename = self.fs.basename(uri)
         else:
-            basename = os.path.basename(filepath)
+            basename = os.path.basename(uri)
 
         name, _ext = os.path.splitext(basename)
         out_name = f"{name}{self.output_ext}"
@@ -614,7 +612,7 @@ class SaveImaged(MapTransform, ThreadUnsafe):
             if target_token:
                 fpath = fpath.replace(os.path.basename(fpath), target_token + ".fake_ext")
 
-            out_path = self.saver(tensor=tensor, filepath=fpath)
+            out_path = self.saver(tensor=tensor, uri=fpath)
             d[f"{key}_saved_path"] = out_path
 
         return d

@@ -71,7 +71,7 @@ class TestLoadDicomSeries(unittest.TestCase):
             self.assertEqual(result.meta['num_slices'], 3)
             self.assertFalse(result.meta['is_multiframe'])
 
-    def test_empty_filepaths_raises(self):
+    def test_empty_uris_raises(self):
         loader = LoadDicomSeries()
         with self.assertRaises(SeriesLoadError):
             loader([])
@@ -89,7 +89,7 @@ class TestLoadDicomSeriesd(unittest.TestCase):
                 _save_dcm(ds, fp)
                 paths.append(fp)
 
-            loader = LoadDicomSeriesd(keys=['image'])
+            loader = LoadDicomSeriesd(keys=['image'], config={})
             data = loader({'image': paths})
 
             self.assertEqual(data['image'].shape, (1, 2, 64, 64))
@@ -124,7 +124,7 @@ class TestSaveDicomSeries(unittest.TestCase):
             )
             paths = saver(
                 datasets=datasets,
-                original_filepaths=original_paths,
+                original_uris=original_paths,
             )
 
             self.assertEqual(len(paths), 3)

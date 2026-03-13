@@ -34,16 +34,16 @@ class LoadImageSeries(Transform):
 
     def __call__(
         self,
-        filepaths: List[str],
+        uris: List[str],
         fs: Optional['AegisFileSystem'] = None,
     ) -> MetaTensor:
-        if not filepaths:
+        if not uris:
             raise SeriesLoadError("Empty file list — nothing to load", transform="LoadImageSeries")
 
         slice_arrays = []
         expected_shape = None
 
-        for i, fp in enumerate(filepaths):
+        for i, fp in enumerate(uris):
             try:
                 if fs is not None:
                     with fs.open_read(fp) as f:
@@ -53,12 +53,12 @@ class LoadImageSeries(Transform):
                     img = Image.open(fp).convert("RGB")
                     arr = np.array(img, dtype=np.float32)
             except Exception as e:
-                raise SeriesLoadError(f"Failed to read image slice {i}: {e}", filepath=fp, transform="LoadImageSeries") from e
+                raise SeriesLoadError(f"Failed to read image slice {i}: {e}", uri=fp, transform="LoadImageSeries") from e
 
             if expected_shape is None:
                 expected_shape = arr.shape
             elif arr.shape != expected_shape:
-                raise SeriesLoadError(f"Dimension mismatch across images: {expected_shape} != {arr.shape}", filepath=fp, transform="LoadImageSeries")
+                raise SeriesLoadError(f"Dimension mismatch across images: {expected_shape} != {arr.shape}", uri=fp, transform="LoadImageSeries")
             
             slice_arrays.append(arr)
 
@@ -66,17 +66,17 @@ class LoadImageSeries(Transform):
             # Stack into (D, H, W, 3)
             volume = np.stack(slice_arrays, axis=0)
         except ValueError as e:
-            raise SeriesLoadError(f"Cannot stack slices: {e}", filepath=filepaths[0], transform="LoadImageSeries") from e
+            raise SeriesLoadError(f"Cannot stack slices: {e}", uri=uris[0], transform="LoadImageSeries") from e
 
         # Convert to (3, D, H, W)
         volume = np.transpose(volume, (3, 0, 1, 2))
 
         meta = {
-            'filename_or_obj': filepaths[0],
+            'filename_or_obj': uris[0],
             'spatial_shape': volume.shape[1:],   # (D, H, W)
             'original_channel_dim': 0,
-            'slice_filepaths': list(filepaths),
-            'num_slices': len(filepaths),
+            'slice_uris': list(uris),
+            'num_slices': len(uris),
         }
         return MetaTensor(torch.as_tensor(volume), meta=meta)
 
@@ -97,21 +97,21 @@ class LoadImageSeriesd(MapTransform):
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
         d = dict(data)
         for key in self.key_iterator(d):
-            filepaths = d[key]
-            if isinstance(filepaths, str):
-                filepaths = [filepaths]
-            filepaths = [str(fp) for fp in filepaths]
+            uris = d[key]
+            if isinstance(uris, str):
+                uris = [uris]
+            uris = [str(fp) for fp in uris]
 
             try:
-                meta_tensor = self.transform(filepaths, fs=self.fs)
+                meta_tensor = self.transform(uris, fs=self.fs)
                 d[key] = meta_tensor
                 d[f"{key}_meta_dict"] = meta_tensor.meta
                 
                 # Fingerprint Series based on Parent Folder name since images have no StudyInstanceUID metadata
                 if self.fs is not None:
-                    folder_name = self.fs.basename(self.fs.dirname(filepaths[0]))
+                    folder_name = self.fs.basename(self.fs.dirname(uris[0]))
                 else:
-                    folder_name = os.path.basename(os.path.dirname(filepaths[0]))
+                    folder_name = os.path.basename(os.path.dirname(uris[0]))
                         
                 target_token = self.identity_manager.get_token(folder_name)
                 d[f"{key}_target_token"] = target_token
@@ -119,7 +119,7 @@ class LoadImageSeriesd(MapTransform):
             except SeriesLoadError:
                 raise
             except Exception as e:
-                raise SeriesLoadError(f"Unexpected error loading image series: {e}", filepath=filepaths[0] if filepaths else '', transform="LoadImageSeriesd") from e
+                raise SeriesLoadError(f"Unexpected error loading image series: {e}", uri=uris[0] if uris else '', transform="LoadImageSeriesd") from e
 
         return d
 
@@ -133,7 +133,7 @@ class SaveImageSeries(Transform):
     def __call__(
         self,
         tensor: torch.Tensor | np.ndarray,
-        original_filepaths: List[str],
+        original_uris: List[str],
         target_token: Optional[str] = None,
     ) -> List[str]:
         output_paths: List[str] = []
@@ -149,12 +149,12 @@ class SaveImageSeries(Transform):
             arr = np.transpose(arr, (1, 2, 3, 0))
             
         num_slices = arr.shape[0]
-        if num_slices != len(original_filepaths):
-            raise SeriesSaveError(f"Tensor Depth ({num_slices}) does not match supplied original filepaths ({len(original_filepaths)})", filepath="", transform="SaveImageSeries")
+        if num_slices != len(original_uris):
+            raise SeriesSaveError(f"Tensor Depth ({num_slices}) does not match supplied original uris ({len(original_uris)})", uri="", transform="SaveImageSeries")
 
         for i in range(num_slices):
             slice_arr = arr[i]
-            orig_fp = original_filepaths[i]
+            orig_fp = original_uris[i]
             
             # Convert float32 back to uint8 for saving via PIL
             if slice_arr.dtype != np.uint8:
@@ -190,7 +190,7 @@ class SaveImageSeries(Transform):
                 else:
                     img.save(out_path)
             except Exception as e:
-                raise SeriesSaveError(f"Failed to save image slice {i}: {e}", filepath=out_path, transform="SaveImageSeries") from e
+                raise SeriesSaveError(f"Failed to save image slice {i}: {e}", uri=out_path, transform="SaveImageSeries") from e
 
             output_paths.append(out_path)
 
@@ -214,18 +214,18 @@ class SaveImageSeriesd(MapTransform, ThreadUnsafe):
         for key in self.key_iterator(d):
             tensor = d[key]
             meta = d.get(f"{key}_meta_dict", {})
-            original_filepaths = meta.get('slice_filepaths', [])
+            original_uris = meta.get('slice_uris', [])
 
             try:
                 out_paths = self.saver(
                     tensor=tensor,
-                    original_filepaths=original_filepaths,
+                    original_uris=original_uris,
                     target_token=d.get(f"{key}_target_token"),
                 )
                 d[f"{key}_saved_paths"] = out_paths
             except SeriesSaveError:
                 raise
             except Exception as e:
-                raise SeriesSaveError(f"Unexpected error saving image series: {e}", filepath=self.saver.output_dir, transform="SaveImageSeriesd") from e
+                raise SeriesSaveError(f"Unexpected error saving image series: {e}", uri=self.saver.output_dir, transform="SaveImageSeriesd") from e
 
         return d

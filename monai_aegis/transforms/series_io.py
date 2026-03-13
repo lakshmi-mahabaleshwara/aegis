@@ -16,8 +16,7 @@ import os
 import logging
 from typing import Any, Dict, Hashable, List, Mapping, Optional, TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from config.storage import AegisFileSystem
+from config.storage import AegisFileSystem
 
 import numpy as np
 import pydicom
@@ -60,15 +59,15 @@ class LoadDicomSeries(Transform):
 
     def __call__(
         self,
-        filepaths: List[str],
+        uris: List[str],
         datasets: Optional[List[pydicom.Dataset]] = None,
         fs: Optional['AegisFileSystem'] = None,
     ) -> MetaTensor:
         """Load a series of DICOM files into a single volume tensor.
 
         Args:
-            filepaths: Sorted list of ``.dcm`` file paths for one series.
-            datasets: Optional pre-loaded pydicom Datasets (one per filepath).
+            uris: Sorted list of ``.dcm`` file paths for one series.
+            datasets: Optional pre-loaded pydicom Datasets (one per uri).
                 If ``None``, each file is read from disk.
 
         Returns:
@@ -79,7 +78,7 @@ class LoadDicomSeries(Transform):
             SeriesLoadError: If files cannot be read, pixels are missing,
                 or slice dimensions are inconsistent.
         """
-        if not filepaths:
+        if not uris:
             raise SeriesLoadError(
                 "Empty file list — nothing to load",
                 transform="LoadDicomSeries",
@@ -88,7 +87,7 @@ class LoadDicomSeries(Transform):
         # Load datasets if not provided
         if datasets is None:
             datasets = []
-            for fp in filepaths:
+            for fp in uris:
                 try:
                     if fs is not None:
                         with fs.open_read(fp) as f:
@@ -98,7 +97,7 @@ class LoadDicomSeries(Transform):
                 except Exception as e:
                     raise SeriesLoadError(
                         f"Failed to read DICOM: {e}",
-                        filepath=fp,
+                        uri=fp,
                         transform="LoadDicomSeries",
                     ) from e
 
@@ -106,15 +105,15 @@ class LoadDicomSeries(Transform):
         if len(datasets) == 1 and hasattr(datasets[0], 'NumberOfFrames'):
             nf = int(datasets[0].NumberOfFrames)
             if nf > 1:
-                return self._load_multiframe(datasets[0], filepaths[0])
+                return self._load_multiframe(datasets[0], uris[0])
 
         # ---- Multi-file series ----
-        return self._load_multifile(datasets, filepaths)
+        return self._load_multifile(datasets, uris)
 
     def _load_multiframe(
         self,
         ds: pydicom.Dataset,
-        filepath: str,
+        uri: str,
     ) -> MetaTensor:
         """Load a single multi-frame DICOM as a volume."""
         try:
@@ -122,7 +121,7 @@ class LoadDicomSeries(Transform):
         except Exception as e:
             raise SeriesLoadError(
                 f"Failed to read pixel data from multi-frame DICOM: {e}",
-                filepath=filepath,
+                uri=uri,
                 transform="LoadDicomSeries",
             ) from e
 
@@ -138,7 +137,7 @@ class LoadDicomSeries(Transform):
             pixel_array = pixel_array[np.newaxis, ...]
 
         meta = {
-            'filename_or_obj': filepath,
+            'filename_or_obj': uri,
             'spatial_shape': pixel_array.shape[1:],   # (D, H, W)
             'original_channel_dim': 0,
             'modality': getattr(ds, 'Modality', ''),
@@ -146,7 +145,7 @@ class LoadDicomSeries(Transform):
             'study_date': getattr(ds, 'StudyDate', ''),
             'study_instance_uid': getattr(ds, 'StudyInstanceUID', ''),
             'series_instance_uid': getattr(ds, 'SeriesInstanceUID', ''),
-            'slice_filepaths': [filepath],
+            'slice_uris': [uri],
             'is_multiframe': True,
             'num_slices': int(ds.NumberOfFrames),
         }
@@ -155,17 +154,17 @@ class LoadDicomSeries(Transform):
     def _load_multifile(
         self,
         datasets: List[pydicom.Dataset],
-        filepaths: List[str],
+        uris: List[str],
     ) -> MetaTensor:
         """Stack multiple single-frame DICOMs into a volume."""
         slice_arrays = []
-        for i, (ds, fp) in enumerate(zip(datasets, filepaths)):
+        for i, (ds, fp) in enumerate(zip(datasets, uris)):
             try:
                 arr = ds.pixel_array.astype(np.float32)
             except Exception as e:
                 raise SeriesLoadError(
                     f"Failed to read pixel data from slice {i}: {e}",
-                    filepath=fp,
+                    uri=fp,
                     transform="LoadDicomSeries",
                 ) from e
 
@@ -185,7 +184,7 @@ class LoadDicomSeries(Transform):
         except ValueError as e:
             raise SeriesLoadError(
                 f"Cannot stack slices — inconsistent dimensions: {e}",
-                filepath=filepaths[0],
+                uri=uris[0],
                 transform="LoadDicomSeries",
             ) from e
 
@@ -199,7 +198,7 @@ class LoadDicomSeries(Transform):
 
         ds0 = datasets[0]
         meta = {
-            'filename_or_obj': filepaths[0],
+            'filename_or_obj': uris[0],
             'spatial_shape': volume.shape[1:],   # (D, H, W)
             'original_channel_dim': 0,
             'modality': getattr(ds0, 'Modality', ''),
@@ -207,7 +206,7 @@ class LoadDicomSeries(Transform):
             'study_date': getattr(ds0, 'StudyDate', ''),
             'study_instance_uid': getattr(ds0, 'StudyInstanceUID', ''),
             'series_instance_uid': getattr(ds0, 'SeriesInstanceUID', ''),
-            'slice_filepaths': list(filepaths),
+            'slice_uris': list(uris),
             'is_multiframe': False,
             'num_slices': len(datasets),
         }
@@ -272,15 +271,15 @@ class LoadDicomSeriesd(MapTransform):
         """
         d = dict(data)
         for key in self.key_iterator(d):
-            filepaths = d[key]
-            if isinstance(filepaths, str):
-                filepaths = [filepaths]
-            filepaths = [str(fp) for fp in filepaths]
+            uris = d[key]
+            if isinstance(uris, str):
+                uris = [uris]
+            uris = [str(fp) for fp in uris]
 
             try:
                 # Load all datasets and cache them
                 datasets: List[pydicom.Dataset] = []
-                for fp in filepaths:
+                for fp in uris:
                     if self.fs is not None:
                         with self.fs.open_read(fp) as f:
                             datasets.append(pydicom.dcmread(f))
@@ -288,7 +287,7 @@ class LoadDicomSeriesd(MapTransform):
                         datasets.append(pydicom.dcmread(fp))
                 d[f"{key}_dicom_datasets"] = datasets
 
-                meta_tensor = self.transform(filepaths, datasets=datasets, fs=self.fs)
+                meta_tensor = self.transform(uris, datasets=datasets, fs=self.fs)
                 d[key] = meta_tensor
                 d[f"{key}_meta_dict"] = meta_tensor.meta
                 
@@ -297,9 +296,9 @@ class LoadDicomSeriesd(MapTransform):
                 if not study_uid:
                     # Fallback to parent folder if StudyUID is missing
                     if self.fs is not None:
-                        study_uid = self.fs.basename(self.fs.dirname(filepaths[0]))
+                        study_uid = self.fs.basename(self.fs.dirname(uris[0]))
                     else:
-                        study_uid = os.path.basename(os.path.dirname(filepaths[0]))
+                        study_uid = os.path.basename(os.path.dirname(uris[0]))
                         
                 target_token = self.identity_manager.get_token(study_uid)
                 d[f"{key}_target_token"] = target_token
@@ -309,7 +308,7 @@ class LoadDicomSeriesd(MapTransform):
             except Exception as e:
                 raise SeriesLoadError(
                     f"Unexpected error loading series: {e}",
-                    filepath=filepaths[0] if filepaths else '',
+                    uri=uris[0] if uris else '',
                     transform="LoadDicomSeriesd",
                 ) from e
 
@@ -341,7 +340,7 @@ class SaveDicomSeries(Transform):
     def __call__(
         self,
         datasets: List[pydicom.Dataset],
-        original_filepaths: List[str],
+        original_uris: List[str],
         target_token: Optional[str] = None,
     ) -> List[str]:
         """Save a list of scrubbed datasets as individual DICOM files.
@@ -352,7 +351,7 @@ class SaveDicomSeries(Transform):
 
         Args:
             datasets: Scrubbed pydicom Datasets (one per slice).
-            original_filepaths: Original input file paths (one per slice).
+            original_uris: Original input file paths (one per slice).
             target_token: Optional enforced output subdirectory name across all slices.
 
         Returns:
@@ -362,7 +361,7 @@ class SaveDicomSeries(Transform):
             SeriesSaveError: If any slice cannot be written.
         """
         output_paths: List[str] = []
-        for i, (ds, orig_fp) in enumerate(zip(datasets, original_filepaths)):
+        for i, (ds, orig_fp) in enumerate(zip(datasets, original_uris)):
             # Regenerate SOPInstanceUID for uniqueness
             ds.SOPInstanceUID = pydicom.uid.generate_uid()
 
@@ -401,7 +400,7 @@ class SaveDicomSeries(Transform):
             except Exception as e:
                 raise SeriesSaveError(
                     f"Failed to save slice {i}: {e}",
-                    filepath=out_path,
+                    uri=out_path,
                     transform="SaveDicomSeries",
                 ) from e
 
@@ -452,7 +451,7 @@ class SaveDicomSeriesd(MapTransform, ThreadUnsafe):
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
         """Save scrubbed DICOM series found in the data dict.
 
-        Uses ``slice_filepaths`` from the metadata to preserve the
+        Uses ``slice_uris`` from the metadata to preserve the
         original folder structure and filenames.
 
         Args:
@@ -471,12 +470,12 @@ class SaveDicomSeriesd(MapTransform, ThreadUnsafe):
                 continue
 
             meta = d.get(f"{key}_meta_dict", {})
-            original_filepaths = meta.get('slice_filepaths', [])
+            original_uris = meta.get('slice_uris', [])
 
             try:
                 self.saver(
                     datasets=scrubbed_list,
-                    original_filepaths=original_filepaths,
+                    original_uris=original_uris,
                     target_token=d.get(f"{key}_target_token"),
                 )
             except SeriesSaveError:
@@ -484,7 +483,7 @@ class SaveDicomSeriesd(MapTransform, ThreadUnsafe):
             except Exception as e:
                 raise SeriesSaveError(
                     f"Unexpected error saving series: {e}",
-                    filepath=self.saver.output_dir,
+                    uri=self.saver.output_dir,
                     transform="SaveDicomSeriesd",
                 ) from e
 

@@ -51,7 +51,7 @@ class ScrubDicomMetadata(Transform):
     Example::
 
         transform = ScrubDicomMetadata(config=config)
-        scrubbed_ds = transform(filepath="/path/to/file.dcm", pixel_data=redacted_array)
+        scrubbed_ds = transform(uri="/path/to/file.dcm", pixel_data=redacted_array)
     """
 
     backend = [TransformBackends.NUMPY]
@@ -63,13 +63,13 @@ class ScrubDicomMetadata(Transform):
 
     def __call__(
         self,
-        filepath: str,
+        uri: str,
         pixel_data: Optional[np.ndarray] = None,
         dataset: Optional[pydicom.Dataset] = None
     ) -> pydicom.Dataset:
         """
         Args:
-            filepath: Path to the DICOM file (fallback if dataset is None).
+            uri: Path to the DICOM file (fallback if dataset is None).
             pixel_data: Optional redacted pixel array to inject.
             dataset: Optional in-memory dataset to process.
 
@@ -83,7 +83,7 @@ class ScrubDicomMetadata(Transform):
         if dataset is not None:
             ds = copy.deepcopy(dataset)
         else:
-            ds = pydicom.dcmread(filepath)
+            ds = pydicom.dcmread(uri)
 
         pii_mapping = self.config.get('pii_mapping', {})
 
@@ -226,7 +226,7 @@ class ScrubDicomMetadatad(MapTransform):
             except Exception as e:
                 raise MetadataScrubError(
                     f"Metadata scrubbing failed: {e}",
-                    filepath=str(fpath),
+                    uri=str(fpath),
                     transform="ScrubDicomMetadatad",
                 ) from e
 
@@ -259,7 +259,7 @@ class ScrubDicomMetadatad(MapTransform):
             pix = (pix * orig_max)
 
         scrubbed_ds = self.transform(
-            filepath=fpath,
+            uri=fpath,
             pixel_data=pix.astype(ds_orig.pixel_array.dtype),
             dataset=ds_orig
         )
@@ -330,7 +330,7 @@ class ScrubDicomMetadatad(MapTransform):
                 slice_pix = (slice_pix * orig_max)
 
             fpath_i = d.get(f"{key}_meta_dict", {}).get(
-                'slice_filepaths', ['']
+                'slice_uris', ['']
             )
             fp = fpath_i[i] if i < len(fpath_i) else fpath_i[0]
 
@@ -342,7 +342,7 @@ class ScrubDicomMetadatad(MapTransform):
 
             # Scrub metadata + inject redacted pixels
             scrubbed_ds = self.transform(
-                filepath=fp,
+                uri=fp,
                 pixel_data=slice_pix.astype(ds_orig.pixel_array.dtype),
                 dataset=ds_orig
             )

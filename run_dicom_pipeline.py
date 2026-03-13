@@ -156,7 +156,7 @@ def run_series(config_path: str) -> None:
 
         for sub_idx, sub_series in enumerate(sub_series_list):
             sorted_series = sort_slices(sub_series)
-            filepaths = [s.filepath for s in sorted_series]
+            uris = [s.uri for s in sorted_series]
 
             label = series_uid
             if len(sub_series_list) > 1:
@@ -164,18 +164,18 @@ def run_series(config_path: str) -> None:
 
             logger.info(
                 "Processing series %s: %d slices (Study: %s)",
-                label, len(filepaths), study_uid[:8],
+                label, len(uris), study_uid[:8],
             )
 
-            if len(filepaths) == 1:
-                filename = os.path.basename(filepaths[0])
+            if len(uris) == 1:
+                filename = os.path.basename(uris[0])
                 logger.info("Routing singleton DICOM %s to single-file mode.", filename)
                 try:
-                    result = pipeline_single({'image': filepaths[0]})
+                    result = pipeline_single({'image': uris[0]})
                     stats = result.get('image_redaction_stats', {})
                     if stats.get('low_confidence_count', 0) > 0:
                         dest = os.path.join(not_processed_dir, filename)
-                        shutil.copy2(filepaths[0], dest)
+                        shutil.copy2(uris[0], dest)
                     total_slices += 1
                 except Exception as e:
                     logger.error("Error processing series %s: %s", label, e, exc_info=True)
@@ -183,7 +183,7 @@ def run_series(config_path: str) -> None:
                 continue
 
             try:
-                result = pipeline({'image': filepaths})
+                result = pipeline({'image': uris})
 
                 stats = result.get('image_redaction_stats', {})
                 strategy = stats.get('volume_strategy', 'unknown')
@@ -197,7 +197,7 @@ def run_series(config_path: str) -> None:
                 )
 
                 series_count += 1
-                total_slices += len(filepaths)
+                total_slices += len(uris)
 
             except Exception as e:
                 logger.error(

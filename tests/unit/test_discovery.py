@@ -119,7 +119,7 @@ class TestSortSlices(unittest.TestCase):
         s2 = DicomSliceInfo('b.dcm', 'sop2', 'st', 'se', 2, [0, 0, 10.0], 'CT', 64, 64)
         s3 = DicomSliceInfo('c.dcm', 'sop3', 'st', 'se', 3, [0, 0, 20.0], 'CT', 64, 64)
         result = sort_slices([s1, s2, s3])
-        self.assertEqual([s.filepath for s in result], ['b.dcm', 'c.dcm', 'a.dcm'])
+        self.assertEqual([s.uri for s in result], ['b.dcm', 'c.dcm', 'a.dcm'])
 
     def test_falls_back_to_instance_number(self):
         s1 = DicomSliceInfo('a.dcm', 'sop1', 'st', 'se', 3, None, 'CT', 64, 64)
@@ -131,7 +131,7 @@ class TestSortSlices(unittest.TestCase):
         s1 = DicomSliceInfo('z.dcm', 'sop1', 'st', 'se', None, None, 'CT', 64, 64)
         s2 = DicomSliceInfo('a.dcm', 'sop2', 'st', 'se', None, None, 'CT', 64, 64)
         result = sort_slices([s1, s2])
-        self.assertEqual(result[0].filepath, 'a.dcm')
+        self.assertEqual(result[0].uri, 'a.dcm')
 
 
 if __name__ == '__main__':

@@ -2,7 +2,7 @@
 MONAI Aegis Custom Exceptions
 
 Structured exception hierarchy for contextual error handling across
-the de-identification pipeline. Each exception carries the filepath
+the de-identification pipeline. Each exception carries the uri
 and originating transform name for diagnostic logging.
 
 Hierarchy::
@@ -21,16 +21,16 @@ class AegisTransformError(Exception):
 
     Args:
         message: Human-readable description of what went wrong.
-        filepath: Path to the file being processed when the error occurred.
+        uri: Path to the file being processed when the error occurred.
         transform: Name of the transform class where the error originated.
     """
 
-    def __init__(self, message: str, filepath: str = "", transform: str = ""):
-        self.filepath = filepath
+    def __init__(self, message: str, uri: str = "", transform: str = ""):
+        self.uri = uri
         self.transform = transform
         full_msg = f"[{transform}] {message}" if transform else message
-        if filepath:
-            full_msg += f" (file: {filepath})"
+        if uri:
+            full_msg += f" (file: {uri})"
         super().__init__(full_msg)
 
 

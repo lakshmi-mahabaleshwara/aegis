@@ -19,8 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from config.storage import AegisFileSystem
+from config.storage import AegisFileSystem
 
 import pydicom
 
@@ -50,7 +49,7 @@ class DicomSliceInfo:
     so pixel data is never loaded at this stage.
 
     Attributes:
-        filepath: Absolute path to the ``.dcm`` file.
+        uri: Absolute path to the ``.dcm`` file.
         sop_instance_uid: Unique identifier for this slice.
         study_instance_uid: Study-level grouping identifier.
         series_instance_uid: Series-level grouping identifier.
@@ -65,7 +64,7 @@ class DicomSliceInfo:
         image_orientation_patient: Direction cosines (6-element list).
         number_of_frames: If > 1, this is a multi-frame DICOM.
     """
-    filepath: str
+    uri: str
     sop_instance_uid: str
     study_instance_uid: str
     series_instance_uid: str
@@ -110,14 +109,14 @@ def discover_dicoms(
         if not fs.isdir(folder):
             raise SeriesLoadError(
                 f"Input folder does not exist: {folder}",
-                filepath=folder,
+                uri=folder,
                 transform="discover_dicoms",
             )
     else:
         if not os.path.isdir(folder):
             raise SeriesLoadError(
                 f"Input folder does not exist: {folder}",
-                filepath=folder,
+                uri=folder,
                 transform="discover_dicoms",
             )
 
@@ -131,16 +130,11 @@ def discover_dicoms(
         for fname in files:
             if not fname.lower().endswith('.dcm'):
                 continue
-            if fs is not None:
-                fpath = fs.join(root, fname)
-            else:
-                fpath = os.path.join(root, fname)
+            _fs = fs if fs is not None else AegisFileSystem()
+            fpath = _fs.join(root, fname)
             try:
-                if fs is not None:
-                    with fs.open_read(fpath) as f:
-                        ds = pydicom.dcmread(f, stop_before_pixels=True)
-                else:
-                    ds = pydicom.dcmread(fpath, stop_before_pixels=True)
+                with _fs.open_read(fpath) as f:
+                    ds = pydicom.dcmread(f, stop_before_pixels=True)
             except Exception as e:
                 logger.warning("Skipping unreadable DICOM %s: %s", fpath, e)
                 continue
@@ -173,7 +167,7 @@ def discover_dicoms(
                     pass
 
             slices.append(DicomSliceInfo(
-                filepath=fpath,
+                uri=fpath,
                 sop_instance_uid=getattr(ds, 'SOPInstanceUID', ''),
                 study_instance_uid=getattr(ds, 'StudyInstanceUID', ''),
                 series_instance_uid=getattr(ds, 'SeriesInstanceUID', ''),
@@ -214,14 +208,14 @@ def discover_images(
         if not fs.isdir(folder):
             raise SeriesLoadError(
                 f"Input folder does not exist: {folder}",
-                filepath=folder,
+                uri=folder,
                 transform="discover_images",
             )
     else:
         if not os.path.isdir(folder):
             raise SeriesLoadError(
                 f"Input folder does not exist: {folder}",
-                filepath=folder,
+                uri=folder,
                 transform="discover_images",
             )
 
@@ -359,4 +353,4 @@ def sort_slices(series: List[DicomSliceInfo]) -> List[DicomSliceInfo]:
         "Series %s lacks positioning and instance numbers — using filename order",
         series[0].series_instance_uid if series else '?',
     )
-    return sorted(series, key=lambda s: s.filepath)
+    return sorted(series, key=lambda s: s.uri)

@@ -23,8 +23,8 @@ class TestExceptionHierarchy(unittest.TestCase):
             self.assertTrue(issubclass(exc_cls, AegisTransformError))
 
     def test_exception_carries_context(self):
-        exc = DicomLoadError("bad file", filepath="/tmp/test.dcm", transform="LoadDicomRaw")
-        self.assertEqual(exc.filepath, "/tmp/test.dcm")
+        exc = DicomLoadError("bad file", uri="/tmp/test.dcm", transform="LoadDicomRaw")
+        self.assertEqual(exc.uri, "/tmp/test.dcm")
         self.assertEqual(exc.transform, "LoadDicomRaw")
         self.assertIn("LoadDicomRaw", str(exc))
         self.assertIn("/tmp/test.dcm", str(exc))
@@ -56,7 +56,7 @@ class TestImageLoadError(unittest.TestCase):
     """Test that unreadable image files raise ImageLoadError."""
 
     def test_missing_image_file(self):
-        loader = LoadImaged(keys=['image'])
+        loader = LoadImaged(keys=['image'], config={})
         with self.assertRaises(ImageLoadError) as ctx:
             loader({'image': '/nonexistent/path/missing.jpg'})
         self.assertIn('missing.jpg', str(ctx.exception))
@@ -66,7 +66,7 @@ class TestImageLoadError(unittest.TestCase):
             f.write(b'NOT A JPEG FILE')
             bad_jpg = f.name
         try:
-            loader = LoadImaged(keys=['image'])
+            loader = LoadImaged(keys=['image'], config={})
             with self.assertRaises(ImageLoadError) as ctx:
                 loader({'image': bad_jpg})
             self.assertIn(bad_jpg, str(ctx.exception))
@@ -87,7 +87,7 @@ class TestDicomSaveError(unittest.TestCase):
         mock_ds.save_as.side_effect = OSError("Permission denied")
 
         with self.assertRaises(DicomSaveError) as ctx:
-            saver(dataset=mock_ds, filepath='/input/test.dcm')
+            saver(dataset=mock_ds, uri='/input/test.dcm')
         self.assertIn('test.dcm', str(ctx.exception))
         self.assertIn('SaveDicom', str(ctx.exception))
 
@@ -98,10 +98,10 @@ class TestPixelRedactionError(unittest.TestCase):
     def test_error_attributes(self):
         exc = PixelRedactionError(
             "OCR crashed",
-            filepath="/tmp/image.jpg",
+            uri="/tmp/image.jpg",
             transform="RedactPixelPHId"
         )
-        self.assertEqual(exc.filepath, "/tmp/image.jpg")
+        self.assertEqual(exc.uri, "/tmp/image.jpg")
         self.assertEqual(exc.transform, "RedactPixelPHId")
         self.assertIn("OCR crashed", str(exc))
 
@@ -112,10 +112,10 @@ class TestMetadataScrubError(unittest.TestCase):
     def test_error_attributes(self):
         exc = MetadataScrubError(
             "Invalid tag format",
-            filepath="/tmp/scan.dcm",
+            uri="/tmp/scan.dcm",
             transform="ScrubDicomMetadatad"
         )
-        self.assertEqual(exc.filepath, "/tmp/scan.dcm")
+        self.assertEqual(exc.uri, "/tmp/scan.dcm")
         self.assertEqual(exc.transform, "ScrubDicomMetadatad")
         self.assertIn("Invalid tag format", str(exc))
 

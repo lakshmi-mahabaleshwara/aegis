@@ -17,7 +17,7 @@ class TestLoadImaged(unittest.TestCase):
     """Unit tests for LoadImaged transform (JPEG/PNG)"""
 
     def setUp(self):
-        self.loader = LoadImaged(keys=['image'])
+        self.loader = LoadImaged(keys=['image'], config={})
 
     def test_jpeg_loading(self):
         """Test loading JPEG images"""
