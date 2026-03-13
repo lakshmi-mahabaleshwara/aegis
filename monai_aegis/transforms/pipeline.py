@@ -25,7 +25,7 @@ from transforms.metadata import ScrubDicomMetadatad
 logger = logging.getLogger(__name__)
 
 
-def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str = './output') -> Compose:
+def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str = './output', input_dir: str = '') -> Compose:
     """
     Build the Aegis de-identification pipeline.
 
@@ -63,7 +63,7 @@ def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str =
         # INGESTION ZONE: Single Disk Read
         # ==========================================
         # Load file and cache pydicom.Dataset in-memory
-        LoadDicomRawd(keys=keys, fs=fs),
+        LoadDicomRawd(keys=keys, config=config, input_dir=input_dir, fs=fs),
 
         # ==========================================
         # LOGIC ZONE: Pure In-Memory Transforms
@@ -79,7 +79,7 @@ def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str =
         # PERSISTENCE ZONE: Single Disk Write
         # ==========================================
         # Save scrubbed DICOM to disk
-        SaveDicomd(keys=keys, output_dir=output_dir, fs=fs),
+        SaveDicomd(keys=keys, output_dir=output_dir, input_dir=input_dir, fs=fs),
     ])
 
 
@@ -140,6 +140,7 @@ def build_series_pipeline(
 def build_image_pipeline(
     config_path: str = '../config/config.yaml',
     output_dir: str = './output',
+    input_dir: str = '',
     output_ext: str = '.png',
 ) -> Compose:
     """Build the Aegis image-only de-identification pipeline.
@@ -173,19 +174,20 @@ def build_image_pipeline(
 
     return Compose([
         # Load: JPEG/PNG → channel-first MetaTensor
-        LoadImaged(keys=keys, config=config, fs=fs),
+        LoadImaged(keys=keys, config=config, input_dir=input_dir, fs=fs),
 
         # Redact: shared pixel-level PHI detection (OCR + NER)
         RedactPixelPHId(keys=keys, config=config),
 
         # Save: channel-first → HWC → output image
-        SaveImaged(keys=keys, output_dir=output_dir, output_ext=output_ext, fs=fs),
+        SaveImaged(keys=keys, output_dir=output_dir, input_dir=input_dir, output_ext=output_ext, fs=fs),
     ])
 
 
 def build_image_series_pipeline(
     config_path: str = '../config/config.yaml',
     output_dir: str = './output',
+    input_dir: str = '',
     output_ext: str = '.png',
 ) -> Compose:
     """Build the pipeline for a folder of standard images (JPEGs/PNGs).
@@ -214,11 +216,11 @@ def build_image_series_pipeline(
 
     return Compose([
         # Ingestion: Load a standard image folder into a volume (C, D, H, W)
-        LoadImageSeriesd(keys=keys, config=config, fs=fs),
+        LoadImageSeriesd(keys=keys, config=config, input_dir=input_dir, fs=fs),
 
         # Logic: Keyframe OCR + pixel redaction
         RedactPixelPHId(keys=keys, config=config),
 
         # Output: Slice volume back into Token folder / Original Name
-        SaveImageSeriesd(keys=keys, output_dir=output_dir, output_ext=output_ext, fs=fs),
+        SaveImageSeriesd(keys=keys, output_dir=output_dir, input_dir=input_dir, output_ext=output_ext, fs=fs),
     ])

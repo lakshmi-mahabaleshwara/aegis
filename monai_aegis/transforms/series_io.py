@@ -301,6 +301,16 @@ class LoadDicomSeriesd(MapTransform):
                         study_uid = os.path.basename(os.path.dirname(uris[0]))
                         
                 target_token = self.identity_manager.get_token(study_uid)
+                
+                # Check relative path depth to ensure we only bypass tokenization for root files
+                rel_path = uris[0]
+                if hasattr(self, 'input_dir') and self.input_dir:
+                    rel_path = os.path.relpath(uris[0], self.input_dir)
+                
+                parts = rel_path.split(os.sep)
+                if len(parts) <= 1:
+                    target_token = None
+
                 d[f"{key}_target_token"] = target_token
                 
             except SeriesLoadError:
@@ -365,30 +375,18 @@ class SaveDicomSeries(Transform):
             # Regenerate SOPInstanceUID for uniqueness
             ds.SOPInstanceUID = pydicom.uid.generate_uid()
 
-            # Format the output tree name
-            if target_token:
-                if self.fs is not None:
-                    basename = self.fs.basename(orig_fp)
-                    rel_path = self.fs.join(target_token, basename)
-                else:
-                    basename = os.path.basename(orig_fp)
-                    rel_path = os.path.join(target_token, basename)
-            elif self.input_dir:
-                if self.fs is not None:
-                    rel_path = self.fs.relpath(orig_fp, self.input_dir)
-                else:
-                    rel_path = os.path.relpath(orig_fp, self.input_dir)
-            else:
-                if self.fs is not None:
-                    rel_path = self.fs.basename(orig_fp)
-                else:
-                    rel_path = os.path.basename(orig_fp)
+            from transforms.utility import build_output_path
+            out_path = build_output_path(
+                uri=orig_fp,
+                output_dir=self.output_dir,
+                input_dir=self.input_dir,
+                target_token=target_token,
+                is_cloud=self.fs is not None and self.fs.protocol != 'file'
+            )
 
             if self.fs is not None:
-                out_path = self.fs.join(self.output_dir, rel_path)
                 self.fs.makedirs(self.fs.dirname(out_path))
             else:
-                out_path = os.path.join(self.output_dir, rel_path)
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
             try:

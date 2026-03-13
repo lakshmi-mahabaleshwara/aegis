@@ -85,12 +85,14 @@ class LoadImageSeriesd(MapTransform):
         self,
         keys: KeysCollection,
         config: Dict[str, Any],
+        input_dir: str = "",
         allow_missing_keys: bool = False,
         fs: Optional['AegisFileSystem'] = None,
     ) -> None:
         super().__init__(keys, allow_missing_keys)
         self.transform = LoadImageSeries()
         self.fs = fs
+        self.input_dir = input_dir
         from transforms.utility import AegisIdentityManager
         self.identity_manager = AegisIdentityManager.from_config(config)
 
@@ -107,13 +109,24 @@ class LoadImageSeriesd(MapTransform):
                 d[key] = meta_tensor
                 d[f"{key}_meta_dict"] = meta_tensor.meta
                 
-                # Fingerprint Series based on Parent Folder name since images have no StudyInstanceUID metadata
-                if self.fs is not None:
-                    folder_name = self.fs.basename(self.fs.dirname(uris[0]))
-                else:
-                    folder_name = os.path.basename(os.path.dirname(uris[0]))
-                        
+                # Fingerprint Series based on Top-Level folder relative to input_dir
+                rel_path = uris[0]
+                if self.input_dir:
+                    if self.fs is not None:
+                        rel_path = self.fs.relpath(uris[0], self.input_dir)
+                    else:
+                        rel_path = os.path.relpath(uris[0], self.input_dir)
+                import posixpath
+                sep = '/' if self.fs is not None else os.sep
+                parts = rel_path.split(sep)
+                folder_name = parts[0] if len(parts) > 1 else "default"
+                
                 target_token = self.identity_manager.get_token(folder_name)
+                # Ensure standalone files directly at the root, or within a single parent directory, 
+                # aren't tokenized unless they are nested natively
+                if len(parts) <= 1:
+                    target_token = None
+                    
                 d[f"{key}_target_token"] = target_token
                 
             except SeriesLoadError:
@@ -124,9 +137,10 @@ class LoadImageSeriesd(MapTransform):
         return d
 
 class SaveImageSeries(Transform):
-    def __init__(self, output_dir: str, output_ext: str = ".png", fs: Optional['AegisFileSystem'] = None) -> None:
+    def __init__(self, output_dir: str, input_dir: str = "", output_ext: str = ".png", fs: Optional['AegisFileSystem'] = None) -> None:
         super().__init__()
         self.output_dir = output_dir
+        self.input_dir = input_dir
         self.output_ext = output_ext
         self.fs = fs
 
@@ -161,26 +175,19 @@ class SaveImageSeries(Transform):
                 slice_arr = np.clip(slice_arr, 0, 255).astype(np.uint8)
             img = Image.fromarray(slice_arr, mode="RGB")
 
-            # Format the output tree name
+            from transforms.utility import build_output_path
+            out_path = build_output_path(
+                uri=orig_fp,
+                output_dir=self.output_dir,
+                input_dir=self.input_dir,
+                target_token=target_token,
+                is_cloud=self.fs is not None and self.fs.protocol != 'file',
+                output_ext=self.output_ext
+            )
+
             if self.fs is not None:
-                basename = self.fs.basename(orig_fp)
-                name, _ext = os.path.splitext(basename)
-                save_filename = f"{name}{self.output_ext}"
-                if target_token:
-                    rel_path = self.fs.join(target_token, save_filename)
-                else: 
-                    rel_path = save_filename
-                out_path = self.fs.join(self.output_dir, rel_path)
                 self.fs.makedirs(self.fs.dirname(out_path))
             else:
-                basename = os.path.basename(orig_fp)
-                name, _ext = os.path.splitext(basename)
-                save_filename = f"{name}{self.output_ext}"
-                if target_token:
-                    rel_path = os.path.join(target_token, save_filename)
-                else:
-                    rel_path = save_filename
-                out_path = os.path.join(self.output_dir, rel_path)
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
             try:
@@ -202,12 +209,13 @@ class SaveImageSeriesd(MapTransform, ThreadUnsafe):
         self,
         keys: KeysCollection,
         output_dir: str,
+        input_dir: str = "",
         output_ext: str = ".png",
         allow_missing_keys: bool = False,
         fs: Optional['AegisFileSystem'] = None,
     ) -> None:
         super().__init__(keys, allow_missing_keys)
-        self.saver = SaveImageSeries(output_dir=output_dir, output_ext=output_ext, fs=fs)
+        self.saver = SaveImageSeries(output_dir=output_dir, input_dir=input_dir, output_ext=output_ext, fs=fs)
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
         d = dict(data)

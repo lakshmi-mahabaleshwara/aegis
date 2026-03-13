@@ -195,6 +195,19 @@ class RedactPixelPHI(Transform):
         self._thread_local = threading.local()
         self._ner_enabled = config.get('ner', {}).get('enabled', False)
 
+    def __getstate__(self):
+        """Exclude threading.local() from pickling for DataLoader multiprocessing."""
+        state = self.__dict__.copy()
+        if '_thread_local' in state:
+            del state['_thread_local']
+        return state
+        
+    def __setstate__(self, state):
+        """Rehydrate threading.local() in the worker process."""
+        self.__dict__.update(state)
+        self._thread_local = threading.local()
+
+
     @property
     def reader(self) -> easyocr.Reader:
         """Lazily create a per-thread EasyOCR reader."""

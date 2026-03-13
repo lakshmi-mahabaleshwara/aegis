@@ -138,12 +138,17 @@ class LoadDicomRawd(MapTransform):
     def __init__(
         self,
         keys: KeysCollection,
+        config: Dict[str, Any] = None,
+        input_dir: str = "",
         allow_missing_keys: bool = False,
         fs: Optional['AegisFileSystem'] = None,
     ) -> None:
         super().__init__(keys, allow_missing_keys)
         self.transform = LoadDicomRaw()
         self.fs = fs
+        self.input_dir = input_dir
+        from transforms.utility import AegisIdentityManager
+        self.identity_manager = AegisIdentityManager.from_config(config) if config else None
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
         """Load each keyed file path into a MetaTensor.
@@ -178,8 +183,28 @@ class LoadDicomRawd(MapTransform):
                         ds = pydicom.dcmread(uri)
                     d[f"{key}_dicom_dataset"] = ds
                     
+                import os
+                target_token = None
+                if self.identity_manager:
+                    rel_path = uri
+                    if hasattr(self, 'input_dir') and self.input_dir:
+                        if self.fs is not None:
+                            rel_path = self.fs.relpath(uri, self.input_dir)
+                        else:
+                            rel_path = os.path.relpath(uri, self.input_dir)
+                    
+                    sep = '/' if self.fs is not None else os.sep
+                    parts = rel_path.split(sep)
+                    folder_name = parts[0] if len(parts) > 1 else "default"
+                    
+                    target_token = self.identity_manager.get_token(folder_name)
+                    # Keep original folder for singleton items in root or shallow nesting (len <= 1)
+                    if len(parts) <= 1:
+                        target_token = None
+
                 meta_tensor = self.transform(uri, dataset=ds, fs=self.fs)
                 d[key] = meta_tensor
+                d[f"{key}_target_token"] = target_token
 
                 # Alias MetaTensor.meta → {key}_meta_dict for backward compatibility.
                 d[f"{key}_meta_dict"] = meta_tensor.meta
@@ -216,28 +241,40 @@ class SaveDicom(Transform):
         saver(dataset=scrubbed_ds, uri="/path/to/original.dcm")
     """
 
-    def __init__(self, output_dir: str, fs: Optional['AegisFileSystem'] = None):
+    def __init__(self, output_dir: str, input_dir: str = "", fs: Optional['AegisFileSystem'] = None):
         super().__init__()
         self.output_dir = output_dir
+        self.input_dir = input_dir
         self.fs = fs
         if fs is not None:
             fs.makedirs(output_dir)
         else:
             os.makedirs(self.output_dir, exist_ok=True)
 
-    def __call__(self, dataset: pydicom.Dataset, uri: str) -> str:
+    def __call__(self, dataset: pydicom.Dataset, uri: str, target_token: Optional[str] = None) -> str:
         """
         Args:
             dataset: Scrubbed pydicom Dataset to save.
             uri: Original uri (used to derive output filename).
+            target_token: Optional identity token to replace the parent folder.
 
         Returns:
             Path to the saved file.
         """
+        from transforms.utility import build_output_path
+        out_path = build_output_path(
+            uri=uri,
+            output_dir=self.output_dir,
+            input_dir=self.input_dir,
+            target_token=target_token,
+            is_cloud=self.fs is not None and self.fs.protocol != 'file'
+        )
+
         if self.fs is not None:
-            out_path = self.fs.join(self.output_dir, self.fs.basename(uri))
+            self.fs.makedirs(self.fs.dirname(out_path))
         else:
-            out_path = os.path.join(self.output_dir, os.path.basename(uri))
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
         try:
             if self.fs is not None:
                 with self.fs.open_write(out_path) as f:
@@ -284,11 +321,12 @@ class SaveDicomd(MapTransform, ThreadUnsafe):
         self,
         keys: KeysCollection,
         output_dir: str,
+        input_dir: str = "",
         allow_missing_keys: bool = False,
         fs: Optional['AegisFileSystem'] = None,
     ) -> None:
         super().__init__(keys, allow_missing_keys)
-        self.saver = SaveDicom(output_dir=output_dir, fs=fs)
+        self.saver = SaveDicom(output_dir=output_dir, input_dir=input_dir, fs=fs)
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
         """Save scrubbed DICOM datasets found in the data dict.
@@ -320,7 +358,8 @@ class SaveDicomd(MapTransform, ThreadUnsafe):
                 continue
 
             try:
-                self.saver(dataset=scrubbed_ds, uri=fpath)
+                out_path = self.saver(dataset=scrubbed_ds, uri=fpath, target_token=d.get(f"{key}_target_token"))
+                d[f"{key}_saved_path"] = out_path
             except DicomSaveError:
                 raise
             except Exception as e:
@@ -421,11 +460,13 @@ class LoadImaged(MapTransform):
         self,
         keys: KeysCollection,
         config: Dict[str, Any],
+        input_dir: str = "",
         allow_missing_keys: bool = False,
         fs: Optional['AegisFileSystem'] = None,
     ) -> None:
         super().__init__(keys, allow_missing_keys)
         self.transform = LoadImage()
+        self.input_dir = input_dir
         self.fs = fs
         from transforms.utility import AegisIdentityManager
         self.identity_manager = AegisIdentityManager.from_config(config)
@@ -442,26 +483,33 @@ class LoadImaged(MapTransform):
         Raises:
             ImageLoadError: If any image file cannot be read.
         """
+        import os
         d = dict(data)
         for key in self.key_iterator(d):
             uri = str(d[key])
             try:
-                # 1. Read raw bytes directly for Fingerprint Token Generation
-                if self.fs is not None:
-                    with self.fs.open_read(uri) as f:
-                        raw_bytes = f.read()
-                else:
-                    with open(uri, 'rb') as f:
-                        raw_bytes = f.read()
+                # 1. Target Token Generation using Top-Level Folder
+                rel_path = uri
+                if hasattr(self, 'input_dir') and self.input_dir:
+                    if self.fs is not None:
+                        rel_path = self.fs.relpath(uri, self.input_dir)
+                    else:
+                        rel_path = os.path.relpath(uri, self.input_dir)
                 
-                # Fingerprint token based on image contents
-                target_token = self.identity_manager.get_token_from_bytes(raw_bytes)
-                d[f"{key}_target_token"] = target_token
+                sep = '/' if self.fs is not None else os.sep
+                parts = rel_path.split(sep)
+                folder_name = parts[0] if len(parts) > 1 else "default"
                 
+                target_token = self.identity_manager.get_token(folder_name)
+                # Keep original folder for singleton items in root or shallow nesting (len <= 1)
+                if len(parts) <= 1:
+                    target_token = None
+                    
                 # 2. Proceed with normal loading
                 meta_tensor = self.transform(uri, fs=self.fs)
                 d[key] = meta_tensor
                 d[f"{key}_meta_dict"] = meta_tensor.meta
+                d[f"{key}_target_token"] = target_token
             except ImageLoadError:
                 raise
             except Exception as e:
@@ -490,24 +538,23 @@ class SaveImage(Transform):
     def __init__(
         self,
         output_dir: str,
+        input_dir: str = "",
         output_ext: str = '.png',
         fs: Optional['AegisFileSystem'] = None,
     ) -> None:
         super().__init__()
         self.output_dir = output_dir
+        self.input_dir = input_dir
         self.output_ext = output_ext
         self.fs = fs
-        if fs is not None:
-            fs.makedirs(output_dir)
-        else:
-            os.makedirs(output_dir, exist_ok=True)
 
-    def __call__(self, tensor: MetaTensor, uri: str) -> str:
+    def __call__(self, tensor: MetaTensor, uri: str, target_token: Optional[str] = None) -> str:
         """Save a redacted image.
 
         Args:
             tensor: Channel-first MetaTensor ``(C, H, W)`` to save.
             uri: Original uri (used to derive output filename).
+            target_token: Optional identity token to replace the parent folder.
 
         Returns:
             Path to the saved file.
@@ -528,25 +575,24 @@ class SaveImage(Transform):
             else:
                 img_array = img_array.astype(np.uint8)
 
-        # Build output path (use target_token if passed, otherwise original name)
-        # Note: Since SaveImaged is a map transform, the actual target token logic
-        # is injected in SaveImaged.__call__.  If called directly, SaveImage preserves 
-        # original name or requires an overriding uri.
-        if self.fs is not None:
-            basename = self.fs.basename(uri)
-        else:
-            basename = os.path.basename(uri)
+        # Build output path (use target_token if passed, replacing top-level directory)
+        from transforms.utility import build_output_path
+        out_path = build_output_path(
+            uri=uri,
+            output_dir=self.output_dir,
+            input_dir=self.input_dir,
+            target_token=target_token,
+            is_cloud=self.fs is not None and self.fs.protocol != 'file',
+            output_ext=self.output_ext
+        )
 
-        name, _ext = os.path.splitext(basename)
-        out_name = f"{name}{self.output_ext}"
-
         if self.fs is not None:
-            out_path = self.fs.join(self.output_dir, out_name)
+            self.fs.makedirs(self.fs.dirname(out_path))
             pil_img = Image.fromarray(img_array)
             with self.fs.open_write(out_path) as f:
                 pil_img.save(f, format=self.output_ext.lstrip('.').upper())
         else:
-            out_path = os.path.join(self.output_dir, out_name)
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
             Image.fromarray(img_array).save(out_path)
 
         logger.info("Saved redacted image to %s", out_path)
@@ -578,12 +624,13 @@ class SaveImaged(MapTransform, ThreadUnsafe):
         self,
         keys: KeysCollection,
         output_dir: str,
+        input_dir: str = "",
         output_ext: str = '.png',
         allow_missing_keys: bool = False,
         fs: Optional['AegisFileSystem'] = None,
     ) -> None:
         super().__init__(keys, allow_missing_keys)
-        self.saver = SaveImage(output_dir=output_dir, output_ext=output_ext, fs=fs)
+        self.saver = SaveImage(output_dir=output_dir, input_dir=input_dir, output_ext=output_ext, fs=fs)
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
         """Save redacted images found in the data dict.
@@ -607,12 +654,7 @@ class SaveImaged(MapTransform, ThreadUnsafe):
             if not fpath:
                 continue
 
-            # Override filename if a target token exists securely generated upstream
-            target_token = d.get(f"{key}_target_token")
-            if target_token:
-                fpath = fpath.replace(os.path.basename(fpath), target_token + ".fake_ext")
-
-            out_path = self.saver(tensor=tensor, uri=fpath)
+            out_path = self.saver(tensor=tensor, uri=fpath, target_token=d.get(f"{key}_target_token"))
             d[f"{key}_saved_path"] = out_path
 
         return d

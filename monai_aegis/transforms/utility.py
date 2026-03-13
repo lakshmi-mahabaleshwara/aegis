@@ -145,3 +145,60 @@ class AegisIdentityManager:
     def cache_size(self) -> int:
         """Number of unique values currently cached."""
         return len(self._cache)
+
+import posixpath
+
+def build_output_path(
+    uri: str,
+    output_dir: str,
+    input_dir: str = "",
+    target_token: Optional[str] = None,
+    is_cloud: bool = False,
+    output_ext: Optional[str] = None,
+) -> str:
+    """Build output path preserving relative structure but overriding parent block with token."""
+    if is_cloud:
+        basename = posixpath.basename(uri)
+    else:
+        basename = os.path.basename(uri)
+
+    if output_ext is not None:
+        name, _ = os.path.splitext(basename)
+        basename = f"{name}{output_ext}"
+
+    if not input_dir:
+        # No reference structure, just put it in target_token/basename if token exists
+        if target_token:
+            rel_path = f"{target_token}/{basename}" if is_cloud else os.path.join(target_token, basename)
+        else:
+            rel_path = basename
+    else:
+        # Prevent trailing slashes from breaking relpath
+        input_dir = input_dir.rstrip('/\\')
+        
+        if is_cloud:
+            # Strip protocol prefix if treating as posix block
+            rel_path = posixpath.relpath(uri, input_dir)
+            sep = '/'
+        else:
+            rel_path = os.path.relpath(uri, input_dir)
+            sep = os.sep
+
+        if output_ext is not None:
+            dirname = posixpath.dirname(rel_path) if is_cloud else os.path.dirname(rel_path)
+            if is_cloud:
+                rel_path = f"{dirname}/{basename}" if dirname else basename
+            else:
+                rel_path = os.path.join(dirname, basename) if dirname else basename
+
+        if target_token:
+            parts = rel_path.split(sep)
+            if len(parts) > 1:
+                # Replace the top-level directory (parent folder) with the token
+                parts[0] = target_token
+                rel_path = sep.join(parts)
+
+    if is_cloud:
+        return f"{output_dir}/{rel_path}" if not output_dir.endswith('/') else f"{output_dir}{rel_path}"
+    else:
+        return os.path.join(output_dir, rel_path)
