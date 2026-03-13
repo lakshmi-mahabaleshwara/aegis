@@ -174,7 +174,21 @@ classDiagram
 
     class LoadDicomRawd {
         +__call__(data)
-        -transform: LoadDicomRaw
+        <<MapTransform>>
+    }
+
+    class LoadDicomSeriesd {
+        +__call__(data)
+        <<MapTransform>>
+    }
+
+    class LoadImaged {
+        +__call__(data)
+        <<MapTransform>>
+    }
+
+    class LoadImageSeriesd {
+        +__call__(data)
         <<MapTransform>>
     }
 
@@ -213,11 +227,29 @@ classDiagram
         <<MapTransform, ThreadUnsafe>>
     }
 
+    class SaveDicomSeriesd {
+        +__call__(data)
+        <<MapTransform, ThreadUnsafe>>
+    }
+
+    class SaveImaged {
+        +__call__(data)
+        <<MapTransform, ThreadUnsafe>>
+    }
+
+    class SaveImageSeriesd {
+        +__call__(data)
+        <<MapTransform, ThreadUnsafe>>
+    }
+
     RunPipeline --> PipelineBuilder
     PipelineBuilder ..> Transforms
     RunPipeline --> RedactPixelPHI : reads stats
 
     LoadDicomRawd --|> MapTransform
+    LoadDicomSeriesd --|> MapTransform
+    LoadImaged --|> MapTransform
+    LoadImageSeriesd --|> MapTransform
     RedactPixelPHId *-- RedactPixelPHI
     RedactPixelPHI *-- PHIClassifier
     RedactPixelPHId --|> MapTransform
@@ -226,6 +258,12 @@ classDiagram
     ScrubDicomMetadatad --|> MapTransform
     SaveDicomd --|> MapTransform
     SaveDicomd --|> ThreadUnsafe
+    SaveDicomSeriesd --|> MapTransform
+    SaveDicomSeriesd --|> ThreadUnsafe
+    SaveImaged --|> MapTransform
+    SaveImaged --|> ThreadUnsafe
+    SaveImageSeriesd --|> MapTransform
+    SaveImageSeriesd --|> ThreadUnsafe
 ```
 
 The pipeline is intentionally designed around multithreading bottlenecks and file I/O safety when operating within a PyTorch `DataLoader(num_workers > 0)`.
@@ -238,11 +276,15 @@ The pipeline is intentionally designed around multithreading bottlenecks and fil
 |-----------|-------------|----------|------------|-------------------|
 | `LoadDicomRawd` | `MapTransform` | Stateless, enriched `MetaTensor.meta` | — | ✅ Safe |
 | `LoadDicomSeriesd` | `MapTransform` | Stateless volume loading | — | ✅ Safe |
+| `LoadImaged` | `MapTransform` | Stateless image loading | — | ✅ Safe |
+| `LoadImageSeriesd` | `MapTransform` | Stateless image series loading | — | ✅ Safe |
 | `RedactPixelPHId` | `MapTransform`, `InvertibleTransform` | `threading.local()` for EasyOCR + NER; keyframe OCR for volumes | ✅ `push/pop_transform` | ✅ Safe |
 | `PHIClassifier` | — | `threading.local()` for NER pipeline | — | ✅ Safe |
 | `ScrubDicomMetadatad` | `MapTransform` | Pure in-memory; geometry-preserving series scrub | — | ✅ Safe |
 | `SaveDicomd` | `MapTransform`, `ThreadUnsafe` | File I/O | — | ⚠️ Main thread sequential write |
 | `SaveDicomSeriesd` | `MapTransform`, `ThreadUnsafe` | Series file I/O, path-preserving | — | ⚠️ Main thread sequential write |
+| `SaveImaged` | `MapTransform`, `ThreadUnsafe` | Image file I/O | — | ⚠️ Main thread sequential write |
+| `SaveImageSeriesd` | `MapTransform`, `ThreadUnsafe` | Image series file I/O | — | ⚠️ Main thread sequential write |
 
 ---
 
@@ -300,10 +342,15 @@ paths:
   input_dir: '${AEGIS_INPUT_DIR:staging_input}'
   output_dir: '${AEGIS_OUTPUT_DIR:staging_output}'
   not_processed_dir: '${AEGIS_REVIEW_DIR:staging_not_processed}'
+  dicom_folder: 'dicom'
+  image_folder: 'image'
 
 storage:
   protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file, s3, gs, az
   options: {}                                   # fsspec options (credentials, etc.)
+
+tokenization:
+  salt: '${AEGIS_TOKEN_SALT:default_dev_salt_string}'
 
 series:
   enabled: true
@@ -454,7 +501,6 @@ aegis/
 
 ---
 
----
 
 ## ⚠️ Error Handling
 
