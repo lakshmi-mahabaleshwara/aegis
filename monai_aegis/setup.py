@@ -10,11 +10,7 @@ setup(
     author="Aegis Team",
     python_requires=">=3.8",
     packages=["monai_aegis", "monai_aegis.transforms", "monai_aegis.config"],
-    package_dir={
-        "monai_aegis": ".",
-        "monai_aegis.transforms": "transforms",
-        "monai_aegis.config": "config",
-    },
+    package_dir={"monai_aegis": "."},
     include_package_data=True,
     install_requires=[
         "monai>=1.0.0",
@@ -36,7 +32,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "aegis-pipeline=run_pipeline:main",
+            "aegis-pipeline=monai_aegis.cli:main",
         ],
     },
     classifiers=[

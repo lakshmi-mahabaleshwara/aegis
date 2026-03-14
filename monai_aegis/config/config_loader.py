@@ -11,13 +11,16 @@ base config before env-var resolution.
 
 Usage::
 
-    from config.config_loader import load_config
+    from monai_aegis.config.config_loader import load_config
 
     # Minimal — uses defaults baked into config.yaml
-    config = load_config('config/config.yaml')
+    config = load_config('monai_aegis/config/config.yaml')
 
     # With overlay (staging / prod)
-    config = load_config('config/config.yaml', overlay_path='config/config.prod.yaml')
+    config = load_config(
+        'monai_aegis/config/config.yaml',
+        overlay_path='config/config.prod.yaml',
+    )
 
     # Or set AEGIS_CONFIG_OVERRIDE=/path/to/override.yaml in the environment
 

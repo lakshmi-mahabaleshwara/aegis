@@ -26,9 +26,9 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **Fully configurable** — PHI labels, clinical allowlist, clinical patterns, and PHI heuristics all defined in `config.yaml`
 
 ### Separate Pipeline Architecture
-- **DICOM pipeline** (`run_dicom_pipeline.py`) — DICOM single-file or series-aware volume mode
-- **Image pipeline** (`run_image_pipeline.py`) — JPEG/PNG single-file or series-aware folder processing
-- **Unified orchestrator** (`run_pipeline.py`) — `--mode auto|dicom|image`
+- **DICOM pipeline** (`monai_aegis.dicom_runner`) — DICOM single-file or series-aware volume mode
+- **Image pipeline** (`monai_aegis.image_runner`) — JPEG/PNG single-file or series-aware folder processing
+- **Unified orchestrator** (`monai_aegis.cli`) — `--mode auto|dicom|image`
 - **Independent scaling** — each pipeline can run on separate infrastructure
 
 ### Cloud Storage (fsspec)
@@ -312,19 +312,19 @@ pip install -e monai_aegis/
 ### Command-Line Runners
 ```bash
 # DICOM pipeline — series mode (default)
-PYTHONPATH=monai_aegis python run_dicom_pipeline.py --config monai_aegis/config/config.yaml
+python -m monai_aegis.dicom_runner --config monai_aegis/config/config.yaml
 
 # DICOM pipeline — single-file mode
-PYTHONPATH=monai_aegis python run_dicom_pipeline.py --config monai_aegis/config/config.yaml --mode single
+python -m monai_aegis.dicom_runner --config monai_aegis/config/config.yaml --mode single
 
 # Image pipeline — series mode (default)
-PYTHONPATH=monai_aegis python run_image_pipeline.py --config monai_aegis/config/config.yaml
+python -m monai_aegis.image_runner --config monai_aegis/config/config.yaml
 
 # Image pipeline — single-file mode
-PYTHONPATH=monai_aegis python run_image_pipeline.py --config monai_aegis/config/config.yaml --mode single
+python -m monai_aegis.image_runner --config monai_aegis/config/config.yaml --mode single
 
 # Unified orchestrator — runs both DICOM and Image pipelines
-PYTHONPATH=monai_aegis python run_pipeline.py --config monai_aegis/config/config.yaml --mode auto
+aegis-pipeline --config monai_aegis/config/config.yaml --mode auto
 
 # Output:
 #   Processed files → staging_output/dicom/YYYY-MM-DD/ or staging_output/image/YYYY-MM-DD/
@@ -415,7 +415,7 @@ paths:
 # Apply overlay via environment variable
 export AEGIS_CONFIG_OVERRIDE=config.prod.yaml
 pip install s3fs  # one-time
-PYTHONPATH=monai_aegis python run_dicom_pipeline.py
+python -m monai_aegis.dicom_runner
 ```
 
 | Backend | Protocol | Extra Package |
@@ -449,10 +449,10 @@ When `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline
 
 ```bash
 # Run all 97 unit tests
-PYTHONPATH=monai_aegis python -m unittest discover tests/unit -v
+python -m unittest discover tests/unit -v
 
 # Run integration tests
-PYTHONPATH=monai_aegis python -m unittest discover tests/integration -v
+python -m unittest discover tests/integration -v
 ```
 
 
@@ -489,9 +489,9 @@ aegis/
 │   │   ├── test_volume_redaction.py   # Volume keyframe OCR
 │   │   └── ...                        # Additional test files
 │   └── integration/                   # End-to-end tests
-├── run_dicom_pipeline.py              # DICOM pipeline entry point (--mode single|series)
-├── run_image_pipeline.py              # Image pipeline entry point (JPEG/PNG)
-├── run_pipeline.py                    # Unified orchestrator (--mode auto|dicom|image)
+├── run_dicom_pipeline.py              # Compatibility wrapper for monai_aegis.dicom_runner
+├── run_image_pipeline.py              # Compatibility wrapper for monai_aegis.image_runner
+├── run_pipeline.py                    # Compatibility wrapper for monai_aegis.cli
 ├── de-identification.ipynb            # Interactive walkthrough notebook
 ├── Dockerfile                         # Container build
 ├── staging_input/                     # Input files (not tracked)
@@ -520,7 +520,7 @@ AegisTransformError          ← base (catch-all)
 **Usage in calling code:**
 
 ```python
-from transforms.exceptions import AegisTransformError, DicomLoadError
+from monai_aegis.transforms.exceptions import AegisTransformError, DicomLoadError
 
 try:
     result = pipeline({'image': filepath})
@@ -542,13 +542,13 @@ docker build -t aegis:latest .
 docker run --rm \
   -v "$(pwd)/staging_input:/app/staging_input:ro" \
   -v "$(pwd)/staging_output:/app/staging_output" \
-  aegis:latest python run_dicom_pipeline.py
+  aegis:latest aegis-pipeline --mode dicom
 
 # Run Image pipeline
 docker run --rm \
   -v "$(pwd)/staging_input:/app/staging_input:ro" \
   -v "$(pwd)/staging_output:/app/staging_output" \
-  aegis:latest python run_image_pipeline.py
+  aegis:latest aegis-pipeline --mode image
 
 # Run tests
 docker run --rm aegis:latest \

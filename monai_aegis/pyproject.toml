@@ -47,7 +47,7 @@ dev = [
 ]
 
 [project.scripts]
-aegis-pipeline = "run_pipeline:main"
+aegis-pipeline = "monai_aegis.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/aegis-team/monai-aegis"
@@ -60,8 +60,6 @@ packages = ["monai_aegis", "monai_aegis.transforms", "monai_aegis.config"]
 
 [tool.setuptools.package-dir]
 monai_aegis = "."
-monai_aegis.transforms = "transforms"
-monai_aegis.config = "config"
 
 [tool.setuptools.package-data]
 "monai_aegis.config" = ["*.yaml"]

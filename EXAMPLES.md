@@ -24,7 +24,7 @@ pip install -e monai_aegis/
 
 ```bash
 # Quick sanity check — should print without errors
-PYTHONPATH=monai_aegis python -c "from transforms.pipeline import build_pipeline; print('✅ Import OK')"
+python -c "from monai_aegis.transforms.pipeline import build_pipeline; print('Import OK')"
 ```
 
 ---
@@ -55,7 +55,7 @@ cp /path/to/your/files/*.jpg  staging_input/
 
 ```bash
 # From the project root directory (aegis/)
-PYTHONPATH=monai_aegis python run_pipeline.py --config monai_aegis/config/config.yaml
+aegis-pipeline --config monai_aegis/config/config.yaml
 ```
 
 **What happens:**
@@ -76,7 +76,7 @@ PYTHONPATH=monai_aegis python run_pipeline.py --config monai_aegis/config/config
 ### Option B: Python API
 
 ```python
-from transforms.pipeline import build_pipeline
+from monai_aegis.transforms.pipeline import build_pipeline
 
 # Build the pipeline (loads config once)
 pipeline = build_pipeline(
@@ -99,11 +99,11 @@ print(result.keys())
 
 ```bash
 # Process just one file to verify setup
-PYTHONPATH=monai_aegis python -c "
-from transforms.pipeline import build_pipeline
+python -c "
+from monai_aegis.transforms.pipeline import build_pipeline
 pipeline = build_pipeline(config_path='monai_aegis/config/config.yaml', output_dir='staging_output')
 result = pipeline({'image': 'staging_input/202601170918250004ABD.JPG'})
-print('✅ Processed successfully')
+print('Processed successfully')
 print('Redaction stats:', result.get('image_redaction_stats', {}))
 "
 ```
@@ -131,32 +131,32 @@ open staging_output/202601170918250004ABD.JPG    # PHI redacted
 ### All Unit Tests (30 tests)
 
 ```bash
-PYTHONPATH=monai_aegis python -m unittest discover tests/unit -v
+python -m unittest discover tests/unit -v
 ```
 
 ### Run Specific Test Modules
 
 ```bash
 # NER classifier tests
-PYTHONPATH=monai_aegis python -m unittest tests.unit.test_ner_classifier -v
+python -m unittest tests.unit.test_ner_classifier -v
 
 # Pixel scrubber tests (OCR + redaction)
-PYTHONPATH=monai_aegis python -m unittest tests.unit.test_pixel_scrubber -v
+python -m unittest tests.unit.test_pixel_scrubber -v
 
 # Redact pixel PHI tests (InvertibleTransform)
-PYTHONPATH=monai_aegis python -m unittest tests.unit.test_redact_pixel_phi -v
+python -m unittest tests.unit.test_redact_pixel_phi -v
 
 # DICOM metadata scrubber tests
-PYTHONPATH=monai_aegis python -m unittest tests.unit.test_scrub_dicom_metadata -v
+python -m unittest tests.unit.test_scrub_dicom_metadata -v
 
 # I/O transform tests (load/save)
-PYTHONPATH=monai_aegis python -m unittest tests.unit.test_io_transforms -v
+python -m unittest tests.unit.test_io_transforms -v
 ```
 
 ### Integration Tests
 
 ```bash
-PYTHONPATH=monai_aegis python -m unittest discover tests/integration -v
+python -m unittest discover tests/integration -v
 ```
 
 ---
@@ -242,7 +242,7 @@ docker run --rm monai_aegis:latest \
 
 | Problem | Solution |
 |---------|----------|
-| `ModuleNotFoundError: No module named 'transforms'` | Run with `PYTHONPATH=monai_aegis` prefix |
+| `ModuleNotFoundError: No module named 'monai_aegis'` | Install the package with `pip install -e monai_aegis/` from the repo root |
 | `No module named 'easyocr'` | Run `pip install -e monai_aegis/` to install dependencies |
 | NER model download is slow | First run downloads ~400MB model; subsequent runs use cache |
 | All files going to `staging_not_processed/` | Lower `ocr.confidence_threshold` in config.yaml (e.g., `0.3`) |
