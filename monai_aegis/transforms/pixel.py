@@ -19,7 +19,7 @@ import logging
 import torch
 from typing import Dict, Hashable, Mapping, Any, List, Optional, Tuple
 from monai.config import KeysCollection
-from monai.transforms import Transform, MapTransform, InvertibleTransform
+from monai.transforms import Transform, MapTransform
 from monai.data import MetaTensor
 from monai.utils.enums import TransformBackends
 
@@ -373,25 +373,19 @@ class RedactPixelPHI(Transform):
 
 
 # ---------------------------------------------------------------------------
-# Dictionary Transform (InvertibleTransform)
+# Dictionary Transform
 # ---------------------------------------------------------------------------
 
-class RedactPixelPHId(MapTransform, InvertibleTransform):
+class RedactPixelPHId(MapTransform):
     """
     Dictionary transform: Detect and redact burned-in PHI text from medical images.
 
-    Dictionary-based wrapper of :py:class:`RedactPixelPHI`.
-    Inherits from both ``MapTransform`` (for ``keys`` / ``key_iterator``) and
-    ``InvertibleTransform`` (for ``push_transform`` / ``pop_transform``).
-    This is the standard MONAI pattern for invertible dictionary transforms
-    (e.g., ``Spacingd``, ``Orientationd``).
+    Dictionary-based wrapper of :py:class:`RedactPixelPHI`. This is a
+    destructive transform: once PHI pixels are zeroed, the original image
+    content cannot be reconstructed from downstream state.
 
     Thread-safe via per-thread EasyOCR reader (``threading.local()``).
     Preserves MetaTensor metadata throughout the transform.
-
-    The ``inverse()`` method cannot restore original pixel values (they are
-    permanently zeroed), but it cleans up the redaction mask and stats from
-    the data dictionary and pops the transform history entry.
 
     Args:
         keys: Keys of the data dictionary to process.
@@ -421,8 +415,6 @@ class RedactPixelPHId(MapTransform, InvertibleTransform):
             - ``{key}_redaction_stats`` — dict of detection/redaction counts.
             - ``{key}_redaction_mask`` — binary ``uint8`` array ``(H, W)``
               where ``1`` = pixel was redacted.
-            - Transform pushed to ``MetaTensor.applied_operations`` for
-              MONAI invertibility tracking.
 
         Args:
             data: Pipeline data dictionary containing MetaTensors.
@@ -484,16 +476,6 @@ class RedactPixelPHId(MapTransform, InvertibleTransform):
                     d[key] = MetaTensor(torch.as_tensor(redacted), meta=input_tensor.meta)
                 else:
                     d[key] = redacted
-
-                # Push transform info for MONAI invertibility tracking
-                self.push_transform(
-                    d,
-                    key,
-                    extra_info={
-                        'redaction_stats': stats,
-                        'redaction_mask_shape': list(redaction_mask.shape),
-                    }
-                )
             except PixelRedactionError:
                 raise
             except Exception as e:
@@ -502,31 +484,5 @@ class RedactPixelPHId(MapTransform, InvertibleTransform):
                     uri=str(uri),
                     transform="RedactPixelPHId",
                 ) from e
-
-        return d
-
-    def inverse(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
-        """Undo the bookkeeping added by ``__call__``.
-
-        .. note::
-            Pixel values are **permanently zeroed** by redaction and cannot
-            be restored. This method only cleans up the redaction mask,
-            stats, and MONAI transform history.
-
-        Args:
-            data: Pipeline data dictionary.
-
-        Returns:
-            Data dictionary with redaction side-keys removed and
-            transform history popped.
-        """
-        d = dict(data)
-        for key in self.key_iterator(d):
-            # Pop the transform history entry
-            self.pop_transform(d, key)
-
-            # Clean up side-keys added by __call__
-            d.pop(f"{key}_redaction_mask", None)
-            d.pop(f"{key}_redaction_stats", None)
 
         return d

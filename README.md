@@ -22,7 +22,7 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **EasyOCR-based text detection** with configurable confidence thresholds
 - **Regex safelist fallback** — preserved for environments without NER model
 - **Low-confidence routing** — images with uncertain OCR are flagged for manual review
-- **InvertibleTransform** — redaction mask tracked through MONAI's transform history for spatial consistency
+- **Redaction mask output** — redacted regions are exposed as side-channel metadata for downstream review
 - **Fully configurable** — PHI labels, clinical allowlist, clinical patterns, and PHI heuristics all defined in `config.yaml`
 
 ### Separate Pipeline Architecture
@@ -45,7 +45,7 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **MONAI-compliant transforms** — array + dictionary variants, `MetaTensor` propagation
 - **Four pipeline modes**: DICOM single (`build_pipeline`), DICOM series (`build_series_pipeline`), Image single (`build_image_pipeline`), and Image series (`build_image_series_pipeline`)
 - **Shared pixel redaction** — `RedactPixelPHId` is format-agnostic, used across all pipelines
-- **Invertible redaction** — `RedactPixelPHId` inherits from `InvertibleTransform`, enabling spatial tracking of redacted regions through downstream transforms
+- **Destructive redaction** — `RedactPixelPHId` permanently zeros PHI pixels and exposes redaction masks/stats as side outputs
 - **Safety lock** — warns when prior spatial transforms may compromise OCR accuracy
 - **Thread-safe by design** — only save transforms are `ThreadUnsafe`
 - **Non-destructive** — input files remain unchanged
@@ -142,12 +142,12 @@ An architectural priority is **strict I/O separation**, allowing the pipeline to
 * Both use `AegisFileSystem` byte streams for cloud storage compatibility.
 
 ### 2. Logic Zone (Purely In-Memory)
-* **Redact (`RedactPixelPHId`)**: An `InvertibleTransform` that uses EasyOCR to detect text, then classifies each detection through a **3-layer pipeline**:
+* **Redact (`RedactPixelPHId`)**: A destructive `MapTransform` that uses EasyOCR to detect text, then classifies each detection through a **3-layer pipeline**:
    * **(1) Clinical allowlist**: preserves known device/parameter terms.
    * **(2) PHI heuristics**: catch obvious date-IDs and institution names.
    * **(3) Stanford NER**: the `stanford-deidentifier-base` model provides semantic classification for remaining text.
    
-   A binary **redaction mask** (matched to the MetaTensor's `spatial_shape`) is generated from PHI detections and tracked via MONAI's `push_transform()`. Images with low OCR confidence bypass this step and are routed to `staging_not_processed/` for manual review. A **safety lock** warns if prior spatial transforms may compromise OCR accuracy. When `ner.enabled: false`, the system falls back to regex safelist matching.
+   A binary **redaction mask** (matched to the MetaTensor's `spatial_shape`) is generated from PHI detections and stored alongside the output image for downstream review. Images with low OCR confidence bypass this step and are routed to `staging_not_processed/` for manual review. A **safety lock** warns if prior spatial transforms may compromise OCR accuracy. When `ner.enabled: false`, the system falls back to regex safelist matching.
 * **Scrub (`ScrubDicomMetadatad`)**: A pure in-memory metadata scrubber (primarily for DICOMs). It works entirely on the cached `pydicom.Dataset` from the Ingestion Zone without hitting the disk again. It calls `AegisIdentityManager` to perform deterministic tokenization, dummy replacement, or removal of designated DICOM tags.
 
 ### 3. Persistence Zone (Single Write)
@@ -194,10 +194,8 @@ classDiagram
 
     class RedactPixelPHId {
         +__call__(data)
-        +inverse(data)
-        +push_transform()
         -transform: RedactPixelPHI
-        <<MapTransform, InvertibleTransform>>
+        <<MapTransform>>
     }
 
     class RedactPixelPHI {
@@ -253,7 +251,6 @@ classDiagram
     RedactPixelPHId *-- RedactPixelPHI
     RedactPixelPHI *-- PHIClassifier
     RedactPixelPHId --|> MapTransform
-    RedactPixelPHId --|> InvertibleTransform
     ScrubDicomMetadatad *-- ScrubDicomMetadata
     ScrubDicomMetadatad --|> MapTransform
     SaveDicomd --|> MapTransform
@@ -278,7 +275,7 @@ The pipeline is intentionally designed around multithreading bottlenecks and fil
 | `LoadDicomSeriesd` | `MapTransform` | Stateless volume loading | — | ✅ Safe |
 | `LoadImaged` | `MapTransform` | Stateless image loading | — | ✅ Safe |
 | `LoadImageSeriesd` | `MapTransform` | Stateless image series loading | — | ✅ Safe |
-| `RedactPixelPHId` | `MapTransform`, `InvertibleTransform` | `threading.local()` for EasyOCR + NER; keyframe OCR for volumes | ✅ `push/pop_transform` | ✅ Safe |
+| `RedactPixelPHId` | `MapTransform` | `threading.local()` for EasyOCR + NER; keyframe OCR for volumes; emits redaction mask/stats side outputs | — | ✅ Safe |
 | `PHIClassifier` | — | `threading.local()` for NER pipeline | — | ✅ Safe |
 | `ScrubDicomMetadatad` | `MapTransform` | Pure in-memory; geometry-preserving series scrub | — | ✅ Safe |
 | `SaveDicomd` | `MapTransform`, `ThreadUnsafe` | File I/O | — | ⚠️ Main thread sequential write |

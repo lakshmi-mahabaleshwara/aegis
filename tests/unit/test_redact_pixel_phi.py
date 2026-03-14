@@ -9,16 +9,15 @@ import torch
 
 from monai_aegis.transforms.pixel import RedactPixelPHId
 from monai.data import MetaTensor
-from monai.transforms import MapTransform, InvertibleTransform
+from monai.transforms import MapTransform
 
 
 class TestRedactPixelPHIdCompliance(unittest.TestCase):
     """Tests for MONAI API base class compliance"""
 
     def test_inherits_from_monai_bases(self):
-        """Verify RedactPixelPHId inherits from both MapTransform and InvertibleTransform"""
+        """Verify RedactPixelPHId inherits from MapTransform only."""
         self.assertTrue(issubclass(RedactPixelPHId, MapTransform))
-        self.assertTrue(issubclass(RedactPixelPHId, InvertibleTransform))
 
     def test_cooperative_init(self):
         """Verify super().__init__() correctly initializes keys via MapTransform"""
@@ -28,13 +27,11 @@ class TestRedactPixelPHIdCompliance(unittest.TestCase):
         self.assertEqual(len(transform.keys), 2)
         self.assertFalse(transform.allow_missing_keys)
 
-    def test_has_invertible_methods(self):
-        """Verify push_transform, pop_transform, and inverse are available"""
+    def test_no_inverse_contract(self):
+        """Verify RedactPixelPHId does not advertise fake invertibility."""
         config = {'ocr': {'languages': ['en']}, 'safelist': []}
         transform = RedactPixelPHId(keys=['image'], config=config)
-        self.assertTrue(hasattr(transform, 'push_transform'))
-        self.assertTrue(hasattr(transform, 'pop_transform'))
-        self.assertTrue(hasattr(transform, 'inverse'))
+        self.assertFalse(hasattr(transform, 'inverse'))
 
 class TestRedactPixelPHId(unittest.TestCase):
     """Unit tests for RedactPixelPHId transform"""
@@ -90,8 +87,8 @@ class TestRedactPixelPHId(unittest.TestCase):
 
     @patch('monai_aegis.transforms.pixel.detect_text')
     @patch('monai_aegis.transforms.pixel.apply_redaction')
-    def test_push_transform_stores_info(self, mock_apply, mock_detect):
-        """Test that push_transform stores redaction info in MetaTensor history"""
+    def test_redaction_mask_is_exposed_without_transform_history(self, mock_apply, mock_detect):
+        """Test that redaction side outputs exist without fake invertibility."""
         test_data = np.ones((1, 10, 10), dtype=np.float32)
         meta_tensor = MetaTensor(torch.as_tensor(test_data), meta={'filename_or_obj': 'test.dcm'})
 
@@ -102,43 +99,13 @@ class TestRedactPixelPHId(unittest.TestCase):
         data = {'image': meta_tensor}
         result = self.scrubber(data)
 
-        # Verify transform was pushed to applied_operations
         output_tensor = result['image']
         self.assertIsInstance(output_tensor, MetaTensor)
-        self.assertTrue(len(output_tensor.applied_operations) > 0)
-
-        # Verify extra_info contains redaction metadata
-        last_op = output_tensor.applied_operations[-1]
-        self.assertIn('extra_info', last_op)
-        self.assertIn('redaction_stats', last_op['extra_info'])
-        self.assertIn('redaction_mask_shape', last_op['extra_info'])
-        self.assertEqual(last_op['extra_info']['redaction_mask_shape'], [10, 10])
+        self.assertEqual(len(output_tensor.applied_operations), 0)
 
         # Verify redaction mask is present and matches spatial_shape
         self.assertIn('image_redaction_mask', result)
         self.assertEqual(result['image_redaction_mask'].shape, (10, 10))
-
-    @patch('monai_aegis.transforms.pixel.detect_text')
-    @patch('monai_aegis.transforms.pixel.apply_redaction')
-    def test_inverse_cleans_up(self, mock_apply, mock_detect):
-        """Test that inverse() removes side-keys and pops transform history"""
-        test_data = np.ones((1, 10, 10), dtype=np.float32)
-        meta_tensor = MetaTensor(torch.as_tensor(test_data), meta={'filename_or_obj': 'test.dcm'})
-
-        empty_stats = {'total_detections': 0, 'low_confidence_count': 0, 'safelisted_count': 0, 'redacted_count': 0}
-        mock_detect.return_value = ([], empty_stats)
-        mock_apply.return_value = test_data.squeeze(0)
-
-        # Forward pass
-        data = {'image': meta_tensor}
-        result = self.scrubber(data)
-        self.assertIn('image_redaction_mask', result)
-        self.assertIn('image_redaction_stats', result)
-
-        # Inverse pass
-        inverted = self.scrubber.inverse(result)
-        self.assertNotIn('image_redaction_mask', inverted)
-        self.assertNotIn('image_redaction_stats', inverted)
 
     @patch('monai_aegis.transforms.pixel.detect_text')
     @patch('monai_aegis.transforms.pixel.apply_redaction')
@@ -170,4 +137,3 @@ class TestRedactPixelPHId(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-

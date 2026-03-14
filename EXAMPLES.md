@@ -143,7 +143,7 @@ python -m unittest tests.unit.test_ner_classifier -v
 # Pixel scrubber tests (OCR + redaction)
 python -m unittest tests.unit.test_pixel_scrubber -v
 
-# Redact pixel PHI tests (InvertibleTransform)
+# Redact pixel PHI tests
 python -m unittest tests.unit.test_redact_pixel_phi -v
 
 # DICOM metadata scrubber tests
