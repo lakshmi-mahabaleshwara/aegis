@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import yaml
 
-from transforms.metadata import ScrubDicomMetadatad
+from monai_aegis.transforms.metadata import ScrubDicomMetadatad
 
 
 class TestScrubDicomMetadatad(unittest.TestCase):
@@ -23,7 +23,7 @@ class TestScrubDicomMetadatad(unittest.TestCase):
             config=self.mock_config
         )
 
-    @patch('transforms.metadata.pydicom.dcmread')
+    @patch('monai_aegis.transforms.metadata.pydicom.dcmread')
     def test_dicom_only_processing(self, mock_dcmread):
         """Test that only DICOM files are processed"""
         # Setup mock DICOM dataset
@@ -67,7 +67,7 @@ class TestScrubDicomMetadatad(unittest.TestCase):
         # No scrubbed_ds for non-DICOM
         self.assertNotIn('image_scrubbed_ds', result)
 
-    @patch('transforms.metadata.pydicom.dcmread')
+    @patch('monai_aegis.transforms.metadata.pydicom.dcmread')
     def test_grayscale_orientation(self, mock_dcmread):
         """Test grayscale image (1, H, W) is squeezed not transposed"""
         mock_ds = MagicMock()
@@ -95,7 +95,7 @@ class TestScrubDicomMetadatad(unittest.TestCase):
         pixel_data = call_kwargs['pixel_data']
         self.assertEqual(pixel_data.ndim, 2)  # Should be (H, W)
 
-    @patch('transforms.metadata.pydicom.dcmread')
+    @patch('monai_aegis.transforms.metadata.pydicom.dcmread')
     def test_rgb_orientation(self, mock_dcmread):
         """Test RGB image (3, H, W) is transposed to (H, W, 3)"""
         mock_ds = MagicMock()
@@ -133,7 +133,7 @@ class TestScrubDicomMetadatad(unittest.TestCase):
         self.scrubber.transform = MagicMock()
         self.scrubber.transform.return_value = mock_ds
 
-        with patch('transforms.metadata.pydicom.dcmread', return_value=mock_ds):
+        with patch('monai_aegis.transforms.metadata.pydicom.dcmread', return_value=mock_ds):
             data = {
                 'image': np.ones((1, 10, 10), dtype=np.float32) * 100,
                 'image_meta_dict': {'filename_or_obj': '/path/to/file.dcm'}
@@ -142,6 +142,32 @@ class TestScrubDicomMetadatad(unittest.TestCase):
 
         # Verify save_as was never called on the dataset
         mock_ds.save_as.assert_not_called()
+
+    def test_multiframe_series_uses_multiframe_scrub_path(self):
+        """Test that multi-frame series are scrubbed as a single dataset."""
+        mock_ds = MagicMock()
+        mock_ds.pixel_array = np.zeros((3, 10, 10), dtype=np.uint16)
+        mock_ds.pixel_array.dtype = np.dtype('uint16')
+        mock_ds.get.return_value = 4095
+
+        data = {
+            'image': np.ones((1, 3, 10, 10), dtype=np.float32) * 100,
+            'image_meta_dict': {
+                'filename_or_obj': '/path/to/file.dcm',
+                'is_multiframe': True,
+            },
+            'image_dicom_datasets': [mock_ds],
+        }
+
+        self.scrubber.transform = MagicMock()
+        self.scrubber.transform.return_value = mock_ds
+
+        result = self.scrubber(data)
+
+        self.scrubber.transform.assert_called_once()
+        pixel_data = self.scrubber.transform.call_args[1]['pixel_data']
+        self.assertEqual(pixel_data.shape, (3, 10, 10))
+        self.assertIn('image_scrubbed_ds', result)
 
 
 if __name__ == '__main__':

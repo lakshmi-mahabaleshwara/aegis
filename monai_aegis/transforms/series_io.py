@@ -16,7 +16,7 @@ import os
 import logging
 from typing import Any, Dict, Hashable, List, Mapping, Optional, TYPE_CHECKING
 
-from config.storage import AegisFileSystem
+from monai_aegis.config.storage import AegisFileSystem
 
 import numpy as np
 import pydicom
@@ -27,7 +27,7 @@ from monai.data import MetaTensor
 from monai.transforms import MapTransform, ThreadUnsafe, Transform
 from monai.utils.enums import TransformBackends
 
-from transforms.exceptions import SeriesLoadError, SeriesSaveError
+from monai_aegis.transforms.exceptions import SeriesLoadError, SeriesSaveError
 
 __all__ = ["LoadDicomSeries", "LoadDicomSeriesd", "SaveDicomSeries", "SaveDicomSeriesd"]
 
@@ -243,13 +243,15 @@ class LoadDicomSeriesd(MapTransform):
         self,
         keys: KeysCollection,
         config: Dict[str, Any],
+        input_dir: str = "",
         allow_missing_keys: bool = False,
         fs: Optional['AegisFileSystem'] = None,
     ) -> None:
         super().__init__(keys, allow_missing_keys)
         self.transform = LoadDicomSeries()
         self.fs = fs
-        from transforms.utility import AegisIdentityManager
+        self.input_dir = input_dir
+        from monai_aegis.transforms.utility import AegisIdentityManager
         self.identity_manager = AegisIdentityManager.from_config(config)
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
@@ -307,7 +309,8 @@ class LoadDicomSeriesd(MapTransform):
                 if hasattr(self, 'input_dir') and self.input_dir:
                     rel_path = os.path.relpath(uris[0], self.input_dir)
                 
-                parts = rel_path.split(os.sep)
+                sep = "/" if self.fs is not None else os.sep
+                parts = rel_path.split(sep)
                 if len(parts) <= 1:
                     target_token = None
 
@@ -375,7 +378,7 @@ class SaveDicomSeries(Transform):
             # Regenerate SOPInstanceUID for uniqueness
             ds.SOPInstanceUID = pydicom.uid.generate_uid()
 
-            from transforms.utility import build_output_path
+            from monai_aegis.transforms.utility import build_output_path
             out_path = build_output_path(
                 uri=orig_fp,
                 output_dir=self.output_dir,
@@ -445,6 +448,7 @@ class SaveDicomSeriesd(MapTransform, ThreadUnsafe):
     ) -> None:
         super().__init__(keys, allow_missing_keys)
         self.saver = SaveDicomSeries(output_dir=output_dir, input_dir=input_dir, fs=fs)
+        self.fs = fs
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
         """Save scrubbed DICOM series found in the data dict.
@@ -463,11 +467,42 @@ class SaveDicomSeriesd(MapTransform, ThreadUnsafe):
         """
         d = dict(data)
         for key in self.key_iterator(d):
+            meta = d.get(f"{key}_meta_dict", {})
+            if meta.get("is_multiframe"):
+                scrubbed_ds = d.get(f"{key}_scrubbed_ds")
+                if scrubbed_ds is None:
+                    continue
+
+                original_uri = meta.get("filename_or_obj")
+                if isinstance(original_uri, list):
+                    original_uri = original_uri[0]
+                if not original_uri:
+                    continue
+
+                from monai_aegis.transforms.io import SaveDicom
+                try:
+                    saver = SaveDicom(
+                        output_dir=self.saver.output_dir,
+                        input_dir=self.saver.input_dir,
+                        fs=self.fs,
+                    )
+                    out_path = saver(
+                        dataset=scrubbed_ds,
+                        uri=str(original_uri),
+                        target_token=d.get(f"{key}_target_token"),
+                    )
+                    d[f"{key}_saved_path"] = out_path
+                except Exception as e:
+                    raise SeriesSaveError(
+                        f"Unexpected error saving multi-frame series: {e}",
+                        uri=str(original_uri),
+                        transform="SaveDicomSeriesd",
+                    ) from e
+                continue
+
             scrubbed_list = d.get(f"{key}_scrubbed_datasets")
             if scrubbed_list is None:
                 continue
-
-            meta = d.get(f"{key}_meta_dict", {})
             original_uris = meta.get('slice_uris', [])
 
             try:
@@ -486,4 +521,3 @@ class SaveDicomSeriesd(MapTransform, ThreadUnsafe):
                 ) from e
 
         return d
-

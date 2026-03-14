@@ -13,7 +13,7 @@ import logging
 from typing import Any, Dict, Hashable, List, Mapping, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from config.storage import AegisFileSystem
+    from monai_aegis.config.storage import AegisFileSystem
 
 import numpy as np
 import torch
@@ -23,7 +23,7 @@ from monai.data import MetaTensor
 from monai.transforms import MapTransform, ThreadUnsafe, Transform
 from monai.utils.enums import TransformBackends
 
-from transforms.exceptions import SeriesLoadError, SeriesSaveError
+from monai_aegis.transforms.exceptions import SeriesLoadError, SeriesSaveError
 
 __all__ = ["LoadImageSeries", "LoadImageSeriesd", "SaveImageSeries", "SaveImageSeriesd"]
 
@@ -93,7 +93,7 @@ class LoadImageSeriesd(MapTransform):
         self.transform = LoadImageSeries()
         self.fs = fs
         self.input_dir = input_dir
-        from transforms.utility import AegisIdentityManager
+        from monai_aegis.transforms.utility import AegisIdentityManager
         self.identity_manager = AegisIdentityManager.from_config(config)
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
@@ -116,7 +116,6 @@ class LoadImageSeriesd(MapTransform):
                         rel_path = self.fs.relpath(uris[0], self.input_dir)
                     else:
                         rel_path = os.path.relpath(uris[0], self.input_dir)
-                import posixpath
                 sep = '/' if self.fs is not None else os.sep
                 parts = rel_path.split(sep)
                 folder_name = parts[0] if len(parts) > 1 else "default"
@@ -175,7 +174,7 @@ class SaveImageSeries(Transform):
                 slice_arr = np.clip(slice_arr, 0, 255).astype(np.uint8)
             img = Image.fromarray(slice_arr, mode="RGB")
 
-            from transforms.utility import build_output_path
+            from monai_aegis.transforms.utility import build_output_path
             out_path = build_output_path(
                 uri=orig_fp,
                 output_dir=self.output_dir,

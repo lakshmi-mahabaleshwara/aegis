@@ -23,7 +23,7 @@ from monai.transforms import Transform, MapTransform, InvertibleTransform
 from monai.data import MetaTensor
 from monai.utils.enums import TransformBackends
 
-from transforms.exceptions import PixelRedactionError
+from monai_aegis.transforms.exceptions import PixelRedactionError
 
 __all__ = ["detect_text", "apply_redaction", "RedactPixelPHI", "RedactPixelPHId"]
 
@@ -228,7 +228,7 @@ class RedactPixelPHI(Transform):
         if not self._ner_enabled:
             return None
         if not hasattr(self._thread_local, 'ner_classifier'):
-            from transforms.ner_classifier import PHIClassifier
+            from monai_aegis.transforms.ner_classifier import PHIClassifier
             self._thread_local.ner_classifier = PHIClassifier(self.config)
             logger.info("NER classifier initialized for thread: %s",
                         threading.current_thread().name)

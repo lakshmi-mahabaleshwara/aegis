@@ -5,7 +5,7 @@ import numpy as np
 import sys
 import os
 
-from transforms.pixel import detect_text, apply_redaction, RedactPixelPHI
+from monai_aegis.transforms.pixel import detect_text, apply_redaction, RedactPixelPHI
 
 class TestPixelScrubber(unittest.TestCase):
 

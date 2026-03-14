@@ -47,7 +47,7 @@ dev = [
 ]
 
 [project.scripts]
-aegis-pipeline = "transforms.pipeline:main"
+aegis-pipeline = "run_pipeline:main"
 
 [project.urls]
 Homepage = "https://github.com/aegis-team/monai-aegis"
@@ -55,11 +55,16 @@ Documentation = "https://github.com/aegis-team/monai-aegis#readme"
 Repository = "https://github.com/aegis-team/monai-aegis"
 Issues = "https://github.com/aegis-team/monai-aegis/issues"
 
-[tool.setuptools.packages.find]
-include = ["transforms*", "config*"]
+[tool.setuptools]
+packages = ["monai_aegis", "monai_aegis.transforms", "monai_aegis.config"]
+
+[tool.setuptools.package-dir]
+monai_aegis = "."
+monai_aegis.transforms = "transforms"
+monai_aegis.config = "config"
 
 [tool.setuptools.package-data]
-config = ["*.yaml"]
+"monai_aegis.config" = ["*.yaml"]
 
 [tool.black]
 line-length = 120

@@ -2,7 +2,7 @@
 import unittest
 import numpy as np
 
-from transforms.pixel import RedactPixelPHI
+from monai_aegis.transforms.pixel import RedactPixelPHI
 
 
 class TestVolumeRedaction(unittest.TestCase):

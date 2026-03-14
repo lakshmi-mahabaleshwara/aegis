@@ -13,26 +13,20 @@ Usage::
     PYTHONPATH=monai_aegis python run_image_pipeline.py --config monai_aegis/config/config.yaml --mode series
 """
 import os
-import sys
 import argparse
 import shutil
 import logging
 import traceback
 
-def simple_collate(batch):
-    return batch
-
-import torch
 from datetime import datetime
 from collections import defaultdict
 
-import monai
-from monai.data import Dataset, DataLoader, list_data_collate
+from monai.data import Dataset, DataLoader
 
-from transforms.pipeline import build_image_pipeline, build_image_series_pipeline
-from transforms.discovery import discover_images
-from config.config_loader import load_config
-from config.storage import AegisFileSystem
+from monai_aegis.transforms.pipeline import build_image_pipeline, build_image_series_pipeline
+from monai_aegis.transforms.discovery import discover_images
+from monai_aegis.config.config_loader import load_config
+from monai_aegis.config.storage import AegisFileSystem
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +34,6 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------
 # Single-file Image mode
 # -----------------------------------------------------------------------
-
-import traceback
 
 def simple_collate(batch):
     return batch
@@ -200,7 +192,6 @@ def run_series(config_path: str) -> None:
 
     # --- Discover ---
     logger.info("Discovering standard images in %s...", pipeline_input_dir)
-    from transforms.discovery import discover_images
     image_files = discover_images(pipeline_input_dir, fs=fs)
 
     if not image_files:

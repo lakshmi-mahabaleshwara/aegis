@@ -7,8 +7,8 @@ import numpy as np
 import pydicom
 from pydicom.uid import ExplicitVRLittleEndian
 
-from transforms.series_io import LoadDicomSeries, LoadDicomSeriesd, SaveDicomSeries
-from transforms.exceptions import SeriesLoadError, SeriesSaveError
+from monai_aegis.transforms.series_io import LoadDicomSeries, LoadDicomSeriesd, SaveDicomSeries
+from monai_aegis.transforms.exceptions import SeriesLoadError, SeriesSaveError
 
 
 def _make_dcm_dataset(rows=64, cols=64, instance_num=1, modality='CT',
@@ -48,6 +48,24 @@ def _save_dcm(ds, path):
     ds.save_as(path, write_like_original=False)
 
 
+def _make_multiframe_dataset(rows=64, cols=64, frames=3, modality='CT',
+                             series_uid='1.2.3', study_uid='1.2.4'):
+    """Create a minimal multi-frame DICOM dataset."""
+    ds = _make_dcm_dataset(
+        rows=rows,
+        cols=cols,
+        instance_num=1,
+        modality=modality,
+        series_uid=series_uid,
+        study_uid=study_uid,
+    )
+    ds.NumberOfFrames = str(frames)
+    ds.PixelData = np.random.randint(
+        0, 4096, (frames, rows, cols), dtype=np.uint16
+    ).tobytes()
+    return ds
+
+
 class TestLoadDicomSeries(unittest.TestCase):
     """Test the LoadDicomSeries array transform."""
 
@@ -75,6 +93,19 @@ class TestLoadDicomSeries(unittest.TestCase):
         loader = LoadDicomSeries()
         with self.assertRaises(SeriesLoadError):
             loader([])
+
+    def test_loads_multiframe_series(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fp = os.path.join(tmpdir, 'multiframe.dcm')
+            ds = _make_multiframe_dataset(frames=4)
+            _save_dcm(ds, fp)
+
+            loader = LoadDicomSeries()
+            result = loader([fp], datasets=[ds])
+
+            self.assertEqual(result.shape, (1, 4, 64, 64))
+            self.assertTrue(result.meta['is_multiframe'])
+            self.assertEqual(result.meta['num_slices'], 4)
 
 
 class TestLoadDicomSeriesd(unittest.TestCase):

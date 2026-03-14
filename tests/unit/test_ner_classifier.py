@@ -4,7 +4,7 @@ Unit tests for PHIClassifier (NER-based PHI detection).
 import unittest
 from unittest.mock import MagicMock
 
-from transforms.ner_classifier import PHIClassifier
+from monai_aegis.transforms.ner_classifier import PHIClassifier
 
 
 class TestPHIClassifier(unittest.TestCase):
@@ -76,7 +76,7 @@ class TestPHIClassifier(unittest.TestCase):
         self.assertEqual(results, [True, False, True, False])
 
     def test_phi_labels_from_config(self):
-        """Test that PHI labels are loaded from config."""
+        """Test that PHI labels are loaded from monai_aegis.config."""
         classifier = PHIClassifier(self.config)
         required = {'PATIENT', 'DOCTOR', 'HOSPITAL', 'DATE', 'IDNUM', 'PHONE', 'EMAIL'}
         self.assertTrue(required.issubset(classifier.phi_labels))

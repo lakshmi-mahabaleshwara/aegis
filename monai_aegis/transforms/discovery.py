@@ -19,11 +19,11 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from config.storage import AegisFileSystem
+from monai_aegis.config.storage import AegisFileSystem
 
 import pydicom
 
-from transforms.exceptions import SeriesLoadError
+from monai_aegis.transforms.exceptions import SeriesLoadError
 
 __all__ = [
     "DicomSliceInfo", "discover_dicoms", "group_into_series",

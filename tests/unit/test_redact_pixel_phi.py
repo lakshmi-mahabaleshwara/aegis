@@ -7,7 +7,7 @@ import yaml
 import logging
 import torch
 
-from transforms.pixel import RedactPixelPHId
+from monai_aegis.transforms.pixel import RedactPixelPHId
 from monai.data import MetaTensor
 from monai.transforms import MapTransform, InvertibleTransform
 
@@ -51,8 +51,8 @@ class TestRedactPixelPHId(unittest.TestCase):
             config=self.config
         )
 
-    @patch('transforms.pixel.detect_text')
-    @patch('transforms.pixel.apply_redaction')
+    @patch('monai_aegis.transforms.pixel.detect_text')
+    @patch('monai_aegis.transforms.pixel.apply_redaction')
     def test_pixel_scrubbing_flow(self, mock_apply, mock_detect):
         """Test the basic pixel scrubbing flow"""
         # Create test data (channel-first format)
@@ -71,8 +71,8 @@ class TestRedactPixelPHId(unittest.TestCase):
         # Verify detect_text was called
         mock_detect.assert_called_once()
 
-    @patch('transforms.pixel.detect_text')
-    @patch('transforms.pixel.apply_redaction')
+    @patch('monai_aegis.transforms.pixel.detect_text')
+    @patch('monai_aegis.transforms.pixel.apply_redaction')
     def test_grayscale_shape_preservation(self, mock_apply, mock_detect):
         """Test that grayscale images maintain shape (1, H, W)"""
         # Grayscale input (1, H, W)
@@ -88,8 +88,8 @@ class TestRedactPixelPHId(unittest.TestCase):
         # Should restore to (1, H, W) after processing
         self.assertEqual(result['image'].shape, (1, 10, 10))
 
-    @patch('transforms.pixel.detect_text')
-    @patch('transforms.pixel.apply_redaction')
+    @patch('monai_aegis.transforms.pixel.detect_text')
+    @patch('monai_aegis.transforms.pixel.apply_redaction')
     def test_push_transform_stores_info(self, mock_apply, mock_detect):
         """Test that push_transform stores redaction info in MetaTensor history"""
         test_data = np.ones((1, 10, 10), dtype=np.float32)
@@ -118,8 +118,8 @@ class TestRedactPixelPHId(unittest.TestCase):
         self.assertIn('image_redaction_mask', result)
         self.assertEqual(result['image_redaction_mask'].shape, (10, 10))
 
-    @patch('transforms.pixel.detect_text')
-    @patch('transforms.pixel.apply_redaction')
+    @patch('monai_aegis.transforms.pixel.detect_text')
+    @patch('monai_aegis.transforms.pixel.apply_redaction')
     def test_inverse_cleans_up(self, mock_apply, mock_detect):
         """Test that inverse() removes side-keys and pops transform history"""
         test_data = np.ones((1, 10, 10), dtype=np.float32)
@@ -140,8 +140,8 @@ class TestRedactPixelPHId(unittest.TestCase):
         self.assertNotIn('image_redaction_mask', inverted)
         self.assertNotIn('image_redaction_stats', inverted)
 
-    @patch('transforms.pixel.detect_text')
-    @patch('transforms.pixel.apply_redaction')
+    @patch('monai_aegis.transforms.pixel.detect_text')
+    @patch('monai_aegis.transforms.pixel.apply_redaction')
     def test_spatial_transform_warning(self, mock_apply, mock_detect):
         """Test that a warning is logged when prior spatial transforms exist"""
         test_data = np.ones((1, 10, 10), dtype=np.float32)
@@ -159,7 +159,7 @@ class TestRedactPixelPHId(unittest.TestCase):
 
         data = {'image': meta_tensor}
 
-        with self.assertLogs('transforms.pixel', level='WARNING') as cm:
+        with self.assertLogs('monai_aegis.transforms.pixel', level='WARNING') as cm:
             self.scrubber(data)
 
         self.assertTrue(

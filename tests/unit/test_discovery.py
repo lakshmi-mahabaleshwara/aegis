@@ -8,7 +8,7 @@ from pydicom.dataset import Dataset, FileDataset
 from pydicom.uid import ExplicitVRLittleEndian
 import numpy as np
 
-from transforms.discovery import (
+from monai_aegis.transforms.discovery import (
     DicomSliceInfo,
     discover_dicoms,
     group_into_series,
@@ -16,7 +16,7 @@ from transforms.discovery import (
     sort_slices,
     ACCEPTED_MODALITIES,
 )
-from transforms.exceptions import SeriesLoadError
+from monai_aegis.transforms.exceptions import SeriesLoadError
 
 
 def _make_dcm(path, modality='CT', rows=64, cols=64, instance_num=1,

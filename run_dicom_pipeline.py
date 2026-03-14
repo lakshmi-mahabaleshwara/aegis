@@ -1,4 +1,3 @@
-import torch
 """
 Aegis DICOM De-identification Pipeline
 
@@ -13,26 +12,21 @@ Usage::
     PYTHONPATH=monai_aegis python run_dicom_pipeline.py --config monai_aegis/config/config.yaml --mode series
 """
 import os
-import sys
 import argparse
 import shutil
 import logging
 import traceback
 
-def simple_collate(batch):
-    return batch
-
 from datetime import datetime
 
-import monai
-from monai.data import Dataset, DataLoader, list_data_collate
+from monai.data import Dataset, DataLoader
 
-from transforms.pipeline import build_pipeline, build_series_pipeline
-from transforms.discovery import (
+from monai_aegis.transforms.pipeline import build_pipeline, build_series_pipeline
+from monai_aegis.transforms.discovery import (
     discover_dicoms, group_into_series, validate_series, sort_slices,
 )
-from config.config_loader import load_config
-from config.storage import AegisFileSystem
+from monai_aegis.config.config_loader import load_config
+from monai_aegis.config.storage import AegisFileSystem
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +34,6 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------
 # Single-file DICOM mode
 # -----------------------------------------------------------------------
-
-import traceback
 
 def simple_collate(batch):
     return batch
@@ -90,7 +82,6 @@ def run_single(config_path: str) -> None:
     not_processed = 0
     errors = 0
 
-    from transforms.discovery import discover_dicoms
     slices = discover_dicoms(pipeline_input_dir, fs=fs)
     data_list = [{'image': s.uri} for s in slices]
 

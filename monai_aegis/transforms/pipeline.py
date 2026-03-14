@@ -11,16 +11,15 @@ Composes the de-identification transforms into MONAI Compose pipelines.
 import os
 import torch
 import logging
-from typing import Optional
 from monai.transforms import Compose
 
-from transforms.io import LoadDicomRawd, SaveDicomd, LoadImaged, SaveImaged
-from transforms.series_io import LoadDicomSeriesd, SaveDicomSeriesd
-from transforms.image_series_io import LoadImageSeriesd, SaveImageSeriesd
-from config.config_loader import load_config
-from config.storage import AegisFileSystem
-from transforms.pixel import RedactPixelPHId
-from transforms.metadata import ScrubDicomMetadatad
+from monai_aegis.transforms.io import LoadDicomRawd, SaveDicomd, LoadImaged, SaveImaged
+from monai_aegis.transforms.series_io import LoadDicomSeriesd, SaveDicomSeriesd
+from monai_aegis.transforms.image_series_io import LoadImageSeriesd, SaveImageSeriesd
+from monai_aegis.config.config_loader import load_config
+from monai_aegis.config.storage import AegisFileSystem
+from monai_aegis.transforms.pixel import RedactPixelPHId
+from monai_aegis.transforms.metadata import ScrubDicomMetadatad
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +123,7 @@ def build_series_pipeline(
 
     return Compose([
         # Ingestion: Load series as volume (C, D, H, W)
-        LoadDicomSeriesd(keys=keys, config=config, fs=fs),
+        LoadDicomSeriesd(keys=keys, config=config, input_dir=input_dir, fs=fs),
 
         # Logic: Keyframe OCR + pixel redaction
         RedactPixelPHId(keys=keys, config=config),

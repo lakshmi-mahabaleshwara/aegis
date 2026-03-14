@@ -5,7 +5,7 @@ import numpy as np
 import pydicom
 from PIL import Image
 
-from transforms.pipeline import build_pipeline
+from monai_aegis.transforms.pipeline import build_pipeline
 
 class TestAegisPipeline(unittest.TestCase):
 

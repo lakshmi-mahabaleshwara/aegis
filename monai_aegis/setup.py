@@ -1,7 +1,7 @@
 """
 MONAI Aegis - Medical Image De-identification Pipeline
 """
-from setuptools import setup, find_packages
+from setuptools import setup
 
 setup(
     name="monai_aegis",
@@ -9,7 +9,12 @@ setup(
     description="MONAI-based medical image de-identification pipeline with OCR and metadata scrubbing",
     author="Aegis Team",
     python_requires=">=3.8",
-    packages=find_packages(),
+    packages=["monai_aegis", "monai_aegis.transforms", "monai_aegis.config"],
+    package_dir={
+        "monai_aegis": ".",
+        "monai_aegis.transforms": "transforms",
+        "monai_aegis.config": "config",
+    },
     include_package_data=True,
     install_requires=[
         "monai>=1.0.0",
@@ -31,7 +36,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "aegis-pipeline=transforms.pipeline:main",
+            "aegis-pipeline=run_pipeline:main",
         ],
     },
     classifiers=[

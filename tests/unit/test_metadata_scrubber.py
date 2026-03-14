@@ -6,8 +6,8 @@ import os
 import pydicom
 from pydicom.dataset import Dataset, FileMetaDataset
 
-from transforms.metadata import ScrubDicomMetadata
-from transforms.utility import AegisIdentityManager
+from monai_aegis.transforms.metadata import ScrubDicomMetadata
+from monai_aegis.transforms.utility import AegisIdentityManager
 
 class TestScrubDicomMetadata(unittest.TestCase):
 

@@ -22,14 +22,14 @@ Example::
     from monai_aegis.transforms import build_series_pipeline, discover_dicoms
     series_pipeline = build_series_pipeline(config_path="config/config.yaml", output_dir="./output")
 """
-from transforms.io import LoadDicomRaw, LoadDicomRawd, SaveDicom, SaveDicomd
-from transforms.series_io import LoadDicomSeries, LoadDicomSeriesd, SaveDicomSeries, SaveDicomSeriesd
-from transforms.pixel import RedactPixelPHI, RedactPixelPHId
-from transforms.metadata import ScrubDicomMetadata, ScrubDicomMetadatad
-from transforms.utility import AegisIdentityManager
-from transforms.ner_classifier import PHIClassifier
-from transforms.pipeline import build_pipeline, build_series_pipeline
-from transforms.discovery import (
+from monai_aegis.transforms.io import LoadDicomRaw, LoadDicomRawd, SaveDicom, SaveDicomd
+from monai_aegis.transforms.series_io import LoadDicomSeries, LoadDicomSeriesd, SaveDicomSeries, SaveDicomSeriesd
+from monai_aegis.transforms.pixel import RedactPixelPHI, RedactPixelPHId
+from monai_aegis.transforms.metadata import ScrubDicomMetadata, ScrubDicomMetadatad
+from monai_aegis.transforms.utility import AegisIdentityManager
+from monai_aegis.transforms.ner_classifier import PHIClassifier
+from monai_aegis.transforms.pipeline import build_pipeline, build_series_pipeline
+from monai_aegis.transforms.discovery import (
     DicomSliceInfo,
     discover_dicoms,
     group_into_series,
@@ -37,7 +37,7 @@ from transforms.discovery import (
     sort_slices,
     ACCEPTED_MODALITIES,
 )
-from transforms.exceptions import (
+from monai_aegis.transforms.exceptions import (
     AegisTransformError,
     DicomLoadError,
     ImageLoadError,

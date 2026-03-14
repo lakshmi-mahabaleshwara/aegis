@@ -23,8 +23,8 @@ from monai.transforms import Transform, MapTransform
 from monai.data import MetaTensor
 from monai.utils.enums import TransformBackends
 
-from transforms.utility import AegisIdentityManager
-from transforms.exceptions import MetadataScrubError
+from monai_aegis.transforms.utility import AegisIdentityManager
+from monai_aegis.transforms.exceptions import MetadataScrubError
 
 __all__ = ["ScrubDicomMetadata", "ScrubDicomMetadatad"]
 
@@ -125,10 +125,36 @@ class ScrubDicomMetadata(Transform):
                 ds.BitsAllocated, ds.BitsStored, ds.HighBit = 16, 16, 15
                 ds.PixelRepresentation = 1 if np.issubdtype(contiguous_pixels.dtype, np.signedinteger) else 0
 
-            ds.SamplesPerPixel = 1 if contiguous_pixels.ndim == 2 else contiguous_pixels.shape[-1]
-            ds.PhotometricInterpretation = "MONOCHROME2" if ds.SamplesPerPixel == 1 else "RGB"
+            if contiguous_pixels.ndim == 2:
+                ds.SamplesPerPixel = 1
+                ds.Rows, ds.Columns = contiguous_pixels.shape
+                if hasattr(ds, "NumberOfFrames"):
+                    del ds.NumberOfFrames
+            elif contiguous_pixels.ndim == 3:
+                if contiguous_pixels.shape[-1] in (3, 4):
+                    ds.SamplesPerPixel = 3
+                    ds.Rows, ds.Columns = contiguous_pixels.shape[:2]
+                    contiguous_pixels = contiguous_pixels[..., :3]
+                    ds.PlanarConfiguration = 0
+                    if hasattr(ds, "NumberOfFrames"):
+                        del ds.NumberOfFrames
+                else:
+                    ds.NumberOfFrames = str(contiguous_pixels.shape[0])
+                    ds.SamplesPerPixel = 1
+                    ds.Rows, ds.Columns = contiguous_pixels.shape[1:]
+            elif contiguous_pixels.ndim == 4 and contiguous_pixels.shape[-1] in (3, 4):
+                ds.NumberOfFrames = str(contiguous_pixels.shape[0])
+                ds.SamplesPerPixel = 3
+                ds.Rows, ds.Columns = contiguous_pixels.shape[1:3]
+                contiguous_pixels = contiguous_pixels[..., :3]
+                ds.PlanarConfiguration = 0
+            else:
+                raise MetadataScrubError(
+                    f"Unsupported pixel array shape for DICOM injection: {contiguous_pixels.shape}",
+                    transform="ScrubDicomMetadata",
+                )
 
-            ds.Rows, ds.Columns = contiguous_pixels.shape[:2]
+            ds.PhotometricInterpretation = "MONOCHROME2" if ds.SamplesPerPixel == 1 else "RGB"
             ds.PixelData = contiguous_pixels.tobytes()
 
             # Fix Windowing
@@ -215,6 +241,9 @@ class ScrubDicomMetadatad(MapTransform):
                 # ---- Series mode: list of datasets ----
                 datasets_list = d.get(f"{key}_dicom_datasets")
                 if datasets_list is not None and isinstance(datasets_list, list):
+                    if meta.get("is_multiframe"):
+                        d = self._scrub_multiframe(d, key, datasets_list[0])
+                        continue
                     d = self._scrub_series(d, key, datasets_list)
                     continue
 
@@ -229,6 +258,59 @@ class ScrubDicomMetadatad(MapTransform):
                     uri=str(fpath),
                     transform="ScrubDicomMetadatad",
                 ) from e
+
+        return d
+
+    def _scrub_multiframe(
+        self,
+        d: Dict[Hashable, Any],
+        key: Hashable,
+        dataset: pydicom.Dataset,
+    ) -> Dict[Hashable, Any]:
+        """Scrub a single multi-frame DICOM while preserving frame structure."""
+        tensor = d[key]
+        volume = tensor.detach().cpu().numpy() if hasattr(tensor, 'detach') else np.array(tensor)
+
+        if volume.ndim != 4:
+            raise MetadataScrubError(
+                f"Expected 4D volume for multi-frame scrub, got {volume.ndim}D",
+                transform="ScrubDicomMetadatad",
+            )
+
+        if volume.shape[0] == 1:
+            pixel_data = volume.squeeze(0)
+        elif volume.shape[0] == 3:
+            pixel_data = np.transpose(volume, (1, 2, 3, 0))
+        else:
+            raise MetadataScrubError(
+                f"Unsupported channel layout for multi-frame scrub: {volume.shape}",
+                transform="ScrubDicomMetadatad",
+            )
+
+        if pixel_data.max() <= 1.1:
+            orig_max = dataset.get("LargestImagePixelValue", 4095)
+            pixel_data = pixel_data * orig_max
+
+        fpath = d.get(f"{key}_meta_dict", {}).get("filename_or_obj", "")
+        scrubbed_ds = self.transform(
+            uri=str(fpath),
+            pixel_data=pixel_data.astype(dataset.pixel_array.dtype),
+            dataset=dataset,
+        )
+        scrubbed_ds.SOPInstanceUID = pydicom.uid.generate_uid()
+        d[f"{key}_scrubbed_ds"] = scrubbed_ds
+
+        scrubbed_pix = scrubbed_ds.pixel_array.astype(np.float32)
+        if scrubbed_pix.ndim == 3:
+            scrubbed_pix = scrubbed_pix[np.newaxis, ...]
+        elif scrubbed_pix.ndim == 4 and scrubbed_pix.shape[-1] == 3:
+            scrubbed_pix = np.transpose(scrubbed_pix, (3, 0, 1, 2))
+
+        original = d[key]
+        if isinstance(original, MetaTensor):
+            d[key] = MetaTensor(torch.as_tensor(scrubbed_pix), meta=original.meta)
+        else:
+            d[key] = scrubbed_pix
 
         return d
 

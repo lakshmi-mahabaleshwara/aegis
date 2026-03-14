@@ -20,14 +20,14 @@ import torch
 import logging
 from typing import Dict, Hashable, Mapping, Any, Optional, Sequence, TYPE_CHECKING, Union
 
-from config.storage import AegisFileSystem
+from monai_aegis.config.storage import AegisFileSystem
 from PIL import Image
 from monai.config import KeysCollection
 from monai.transforms import Transform, MapTransform, ThreadUnsafe
 from monai.data import MetaTensor
 from monai.utils.enums import TransformBackends
 
-from transforms.exceptions import (
+from monai_aegis.transforms.exceptions import (
     DicomLoadError, ImageLoadError, DicomSaveError
 )
 
@@ -147,7 +147,7 @@ class LoadDicomRawd(MapTransform):
         self.transform = LoadDicomRaw()
         self.fs = fs
         self.input_dir = input_dir
-        from transforms.utility import AegisIdentityManager
+        from monai_aegis.transforms.utility import AegisIdentityManager
         self.identity_manager = AegisIdentityManager.from_config(config) if config else None
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
@@ -261,7 +261,7 @@ class SaveDicom(Transform):
         Returns:
             Path to the saved file.
         """
-        from transforms.utility import build_output_path
+        from monai_aegis.transforms.utility import build_output_path
         out_path = build_output_path(
             uri=uri,
             output_dir=self.output_dir,
@@ -468,7 +468,7 @@ class LoadImaged(MapTransform):
         self.transform = LoadImage()
         self.input_dir = input_dir
         self.fs = fs
-        from transforms.utility import AegisIdentityManager
+        from monai_aegis.transforms.utility import AegisIdentityManager
         self.identity_manager = AegisIdentityManager.from_config(config)
 
     def __call__(self, data: Mapping[Hashable, Any]) -> Dict[Hashable, Any]:
@@ -576,7 +576,7 @@ class SaveImage(Transform):
                 img_array = img_array.astype(np.uint8)
 
         # Build output path (use target_token if passed, replacing top-level directory)
-        from transforms.utility import build_output_path
+            from monai_aegis.transforms.utility import build_output_path
         out_path = build_output_path(
             uri=uri,
             output_dir=self.output_dir,
@@ -658,4 +658,3 @@ class SaveImaged(MapTransform, ThreadUnsafe):
             d[f"{key}_saved_path"] = out_path
 
         return d
-

@@ -3,7 +3,7 @@ import numpy as np
 from PIL import Image
 import io
 
-from transforms.io import LoadDicomRawd, LoadImaged
+from monai_aegis.transforms.io import LoadDicomRawd, LoadImaged
 
 
 class TestLoadDicomRawd(unittest.TestCase):

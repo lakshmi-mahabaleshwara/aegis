@@ -3,7 +3,7 @@ import tempfile
 import os
 import numpy as np
 
-from transforms.exceptions import (
+from monai_aegis.transforms.exceptions import (
     AegisTransformError,
     DicomLoadError,
     ImageLoadError,
@@ -11,7 +11,7 @@ from transforms.exceptions import (
     MetadataScrubError,
     DicomSaveError,
 )
-from transforms.io import LoadDicomRawd, LoadImaged, SaveDicom
+from monai_aegis.transforms.io import LoadDicomRawd, LoadImaged, SaveDicom
 
 
 class TestExceptionHierarchy(unittest.TestCase):

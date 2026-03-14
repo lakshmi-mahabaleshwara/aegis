@@ -11,7 +11,7 @@ import yaml
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'monai_aegis'))
 
-from config.config_loader import resolve_env_vars, deep_merge, load_config
+from monai_aegis.config.config_loader import resolve_env_vars, deep_merge, load_config
 
 
 class TestResolveEnvVars(unittest.TestCase):
