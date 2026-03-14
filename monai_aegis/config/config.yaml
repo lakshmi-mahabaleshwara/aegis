@@ -6,6 +6,9 @@ paths:
   image_folder: 'image'
   timestamp_format: '%Y-%m-%d_%H-%M'
 
+runtime:
+  dataloader_num_workers: 0
+
 storage:
   protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file, s3, gs, az, memory
   options: {}                                    # fsspec kwargs (key, secret, endpoint_url, etc.)

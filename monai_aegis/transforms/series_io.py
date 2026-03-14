@@ -293,26 +293,13 @@ class LoadDicomSeriesd(MapTransform):
                 d[key] = meta_tensor
                 d[f"{key}_meta_dict"] = meta_tensor.meta
                 
-                # Fingerprint Series based on StudyInstanceUID or Parent Folder
-                study_uid = meta_tensor.meta.get('study_instance_uid')
-                if not study_uid:
-                    # Fallback to parent folder if StudyUID is missing
-                    if self.fs is not None:
-                        study_uid = self.fs.basename(self.fs.dirname(uris[0]))
-                    else:
-                        study_uid = os.path.basename(os.path.dirname(uris[0]))
-                        
-                target_token = self.identity_manager.get_token(study_uid)
-                
-                # Check relative path depth to ensure we only bypass tokenization for root files
-                rel_path = uris[0]
-                if hasattr(self, 'input_dir') and self.input_dir:
-                    rel_path = os.path.relpath(uris[0], self.input_dir)
-                
-                sep = "/" if self.fs is not None else os.sep
-                parts = rel_path.split(sep)
-                if len(parts) <= 1:
-                    target_token = None
+                from monai_aegis.transforms.utility import resolve_target_token
+                target_token = resolve_target_token(
+                    uri=uris[0],
+                    identity_manager=self.identity_manager,
+                    input_dir=self.input_dir,
+                    fs=self.fs,
+                )
 
                 d[f"{key}_target_token"] = target_token
                 

@@ -32,6 +32,7 @@ class RunnerPaths:
     output_dir: str
     not_processed_dir: str
     pipeline_input_dir: str
+    dataloader_num_workers: int
 
 
 @dataclass
@@ -50,6 +51,14 @@ def _require_config_value(config: dict[str, Any], section: str, key: str) -> str
     value = section_data[key]
     if not isinstance(value, str) or not value:
         raise ValueError(f"Config value must be a non-empty string: {section}.{key}")
+    return value
+
+
+def _get_num_workers(config: dict[str, Any]) -> int:
+    runtime = config.get("runtime", {})
+    value = runtime.get("dataloader_num_workers", 0)
+    if not isinstance(value, int) or value < 0:
+        raise ValueError("Config value must be a non-negative integer: runtime.dataloader_num_workers")
     return value
 
 
@@ -84,6 +93,7 @@ def _build_runner_paths(config_path: str, folder_key: str) -> tuple[dict[str, An
     not_processed_dir = _require_config_value(config, "paths", "not_processed_dir")
     folder_name = _require_config_value(config, "paths", folder_key)
     timestamp_format = _require_config_value(config, "paths", "timestamp_format")
+    dataloader_num_workers = _get_num_workers(config)
     timestamp_str = datetime.now().strftime(timestamp_format)
     output_dir = os.path.join(base_output_dir, folder_name, timestamp_str)
 
@@ -98,6 +108,7 @@ def _build_runner_paths(config_path: str, folder_key: str) -> tuple[dict[str, An
         output_dir=output_dir,
         not_processed_dir=not_processed_dir,
         pipeline_input_dir=os.path.join(input_dir, folder_name),
+        dataloader_num_workers=dataloader_num_workers,
     )
 
 
@@ -293,7 +304,7 @@ def run_series(config_path: str) -> None:
         for data_dict in _run_dataloader(
             singletons_data,
             pipeline_single,
-            num_workers=min(4, os.cpu_count() or 1),
+            num_workers=paths.dataloader_num_workers,
         ):
             if _handle_error_result(data_dict, paths, summary, "NOT PROCESSED (ERROR)"):
                 continue
@@ -303,7 +314,7 @@ def run_series(config_path: str) -> None:
         for data_dict in _run_dataloader(
             series_data,
             pipeline,
-            num_workers=min(4, os.cpu_count() or 1),
+            num_workers=paths.dataloader_num_workers,
         ):
             label = data_dict.get("label", "unknown")
             if _handle_error_result(data_dict, paths, summary, f"NOT PROCESSED (ERROR): Series {label}"):

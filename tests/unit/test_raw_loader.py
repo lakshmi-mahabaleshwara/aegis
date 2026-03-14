@@ -2,6 +2,8 @@ import unittest
 import numpy as np
 from PIL import Image
 import io
+import os
+import tempfile
 
 from monai_aegis.transforms.io import LoadDicomRawd, LoadImaged
 
@@ -60,7 +62,6 @@ class TestLoadImaged(unittest.TestCase):
         """Test loading grayscale JPEG images"""
         img = Image.new('L', (10, 10), color=128)
 
-        import tempfile
         with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as f:
             jpg_path = f.name
             img.save(jpg_path)
@@ -73,8 +74,42 @@ class TestLoadImaged(unittest.TestCase):
             self.assertEqual(result['image'].ndim, 3)
             self.assertEqual(result['image'].shape[0], 1)
         finally:
-            import os
             os.unlink(jpg_path)
+
+    def test_target_token_uses_top_level_relative_folder(self):
+        """Nested image inputs should tokenize by the first path segment under input_dir."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = os.path.join(tmpdir, "input")
+            nested_dir = os.path.join(input_dir, "patient_a", "series_1")
+            os.makedirs(nested_dir)
+            image_path = os.path.join(nested_dir, "img.jpg")
+            Image.new('RGB', (10, 10), color='red').save(image_path)
+
+            loader = LoadImaged(
+                keys=['image'],
+                config={'tokenization': {'salt': 'test-salt'}},
+                input_dir=input_dir,
+            )
+            result = loader({'image': image_path})
+
+            self.assertIsNotNone(result['image_target_token'])
+
+    def test_target_token_is_none_for_root_level_image(self):
+        """Files directly under input_dir should keep their original top-level layout."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = os.path.join(tmpdir, "input")
+            os.makedirs(input_dir)
+            image_path = os.path.join(input_dir, "img.jpg")
+            Image.new('RGB', (10, 10), color='red').save(image_path)
+
+            loader = LoadImaged(
+                keys=['image'],
+                config={'tokenization': {'salt': 'test-salt'}},
+                input_dir=input_dir,
+            )
+            result = loader({'image': image_path})
+
+            self.assertIsNone(result['image_target_token'])
 
 
 class TestLoadDicomRawdDicom(unittest.TestCase):
@@ -133,8 +168,84 @@ class TestLoadDicomRawdDicom(unittest.TestCase):
             # Verify meta_dict is a reference (not a detached copy)
             self.assertIs(result['image_meta_dict'], result['image'].meta)
         finally:
-            import os
             os.unlink(dcm_path)
+
+    def test_target_token_uses_top_level_relative_folder_for_dicom(self):
+        """Nested DICOM inputs should tokenize by the first path segment under input_dir."""
+        import pydicom
+        from pydicom.dataset import FileDataset
+        from pydicom.uid import ExplicitVRLittleEndian
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = os.path.join(tmpdir, "input")
+            nested_dir = os.path.join(input_dir, "patient_a", "series_1")
+            os.makedirs(nested_dir)
+            dcm_path = os.path.join(nested_dir, "img.dcm")
+
+            file_meta = pydicom.Dataset()
+            file_meta.MediaStorageSOPClassUID = '1.2.840.10008.5.1.4.1.1.2'
+            file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
+            file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+
+            ds = FileDataset(dcm_path, {}, file_meta=file_meta, preamble=b"\x00" * 128)
+            ds.Rows = 10
+            ds.Columns = 10
+            ds.BitsAllocated = 16
+            ds.BitsStored = 16
+            ds.HighBit = 15
+            ds.PixelRepresentation = 0
+            ds.SamplesPerPixel = 1
+            ds.PhotometricInterpretation = 'MONOCHROME2'
+            ds.PixelData = np.zeros((10, 10), dtype=np.uint16).tobytes()
+            ds.Modality = 'US'
+            ds.save_as(dcm_path)
+
+            loader = LoadDicomRawd(
+                keys=['image'],
+                config={'tokenization': {'salt': 'test-salt'}},
+                input_dir=input_dir,
+            )
+            result = loader({'image': dcm_path})
+
+            self.assertIsNotNone(result['image_target_token'])
+
+    def test_target_token_is_none_for_root_level_dicom(self):
+        """Root-level DICOM files should not be tokenized."""
+        import pydicom
+        from pydicom.dataset import FileDataset
+        from pydicom.uid import ExplicitVRLittleEndian
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = os.path.join(tmpdir, "input")
+            os.makedirs(input_dir)
+            dcm_path = os.path.join(input_dir, "img.dcm")
+
+            file_meta = pydicom.Dataset()
+            file_meta.MediaStorageSOPClassUID = '1.2.840.10008.5.1.4.1.1.2'
+            file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
+            file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+
+            ds = FileDataset(dcm_path, {}, file_meta=file_meta, preamble=b"\x00" * 128)
+            ds.Rows = 10
+            ds.Columns = 10
+            ds.BitsAllocated = 16
+            ds.BitsStored = 16
+            ds.HighBit = 15
+            ds.PixelRepresentation = 0
+            ds.SamplesPerPixel = 1
+            ds.PhotometricInterpretation = 'MONOCHROME2'
+            ds.PixelData = np.zeros((10, 10), dtype=np.uint16).tobytes()
+            ds.Modality = 'US'
+            ds.save_as(dcm_path)
+
+            loader = LoadDicomRawd(
+                keys=['image'],
+                config={'tokenization': {'salt': 'test-salt'}},
+                input_dir=input_dir,
+            )
+            result = loader({'image': dcm_path})
+
+            self.assertIsNone(result['image_target_token'])
 
 
 if __name__ == '__main__':

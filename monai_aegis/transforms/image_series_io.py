@@ -109,23 +109,14 @@ class LoadImageSeriesd(MapTransform):
                 d[key] = meta_tensor
                 d[f"{key}_meta_dict"] = meta_tensor.meta
                 
-                # Fingerprint Series based on Top-Level folder relative to input_dir
-                rel_path = uris[0]
-                if self.input_dir:
-                    if self.fs is not None:
-                        rel_path = self.fs.relpath(uris[0], self.input_dir)
-                    else:
-                        rel_path = os.path.relpath(uris[0], self.input_dir)
-                sep = '/' if self.fs is not None else os.sep
-                parts = rel_path.split(sep)
-                folder_name = parts[0] if len(parts) > 1 else "default"
-                
-                target_token = self.identity_manager.get_token(folder_name)
-                # Ensure standalone files directly at the root, or within a single parent directory, 
-                # aren't tokenized unless they are nested natively
-                if len(parts) <= 1:
-                    target_token = None
-                    
+                from monai_aegis.transforms.utility import resolve_target_token
+                target_token = resolve_target_token(
+                    uri=uris[0],
+                    identity_manager=self.identity_manager,
+                    input_dir=self.input_dir,
+                    fs=self.fs,
+                )
+
                 d[f"{key}_target_token"] = target_token
                 
             except SeriesLoadError:

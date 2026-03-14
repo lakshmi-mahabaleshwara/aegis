@@ -128,6 +128,47 @@ class TestLoadDicomSeriesd(unittest.TestCase):
             self.assertEqual(len(data['image_dicom_datasets']), 2)
             self.assertIn('image_meta_dict', data)
 
+    def test_target_token_uses_top_level_relative_folder_for_series(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = os.path.join(tmpdir, 'input')
+            series_dir = os.path.join(input_dir, 'patient_a', 'series_1')
+            os.makedirs(series_dir)
+            paths = []
+            for i in range(2):
+                fp = os.path.join(series_dir, f'slice_{i}.dcm')
+                ds = _make_dcm_dataset(instance_num=i + 1)
+                _save_dcm(ds, fp)
+                paths.append(fp)
+
+            loader = LoadDicomSeriesd(
+                keys=['image'],
+                config={'tokenization': {'salt': 'test-salt'}},
+                input_dir=input_dir,
+            )
+            data = loader({'image': paths})
+
+            self.assertIsNotNone(data['image_target_token'])
+
+    def test_target_token_is_none_for_root_level_series(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = os.path.join(tmpdir, 'input')
+            os.makedirs(input_dir)
+            paths = []
+            for i in range(2):
+                fp = os.path.join(input_dir, f'slice_{i}.dcm')
+                ds = _make_dcm_dataset(instance_num=i + 1)
+                _save_dcm(ds, fp)
+                paths.append(fp)
+
+            loader = LoadDicomSeriesd(
+                keys=['image'],
+                config={'tokenization': {'salt': 'test-salt'}},
+                input_dir=input_dir,
+            )
+            data = loader({'image': paths})
+
+            self.assertIsNone(data['image_target_token'])
+
 
 class TestSaveDicomSeries(unittest.TestCase):
     """Test the SaveDicomSeries array transform."""

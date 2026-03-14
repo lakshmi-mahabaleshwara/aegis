@@ -148,6 +148,35 @@ class AegisIdentityManager:
 
 import posixpath
 
+
+def resolve_target_token(
+    uri: str,
+    identity_manager: Optional[AegisIdentityManager],
+    input_dir: str = "",
+    fs: Optional[object] = None,
+) -> Optional[str]:
+    """Resolve a token from the top-level folder relative to ``input_dir``.
+
+    Contract used across all loaders:
+      - If ``input_dir`` is empty, do not tokenize.
+      - If the file sits directly under ``input_dir``, do not tokenize.
+      - Otherwise tokenize the first relative path segment.
+    """
+    if identity_manager is None or not input_dir:
+        return None
+
+    if fs is not None:
+        rel_path = fs.relpath(uri, input_dir)
+        sep = "/"
+    else:
+        rel_path = os.path.relpath(uri, input_dir)
+        sep = os.sep
+
+    parts = [part for part in rel_path.split(sep) if part not in ("", ".")]
+    if len(parts) <= 1:
+        return None
+    return identity_manager.get_token(parts[0])
+
 def build_output_path(
     uri: str,
     output_dir: str,

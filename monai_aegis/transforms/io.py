@@ -183,24 +183,13 @@ class LoadDicomRawd(MapTransform):
                         ds = pydicom.dcmread(uri)
                     d[f"{key}_dicom_dataset"] = ds
                     
-                import os
-                target_token = None
-                if self.identity_manager:
-                    rel_path = uri
-                    if hasattr(self, 'input_dir') and self.input_dir:
-                        if self.fs is not None:
-                            rel_path = self.fs.relpath(uri, self.input_dir)
-                        else:
-                            rel_path = os.path.relpath(uri, self.input_dir)
-                    
-                    sep = '/' if self.fs is not None else os.sep
-                    parts = rel_path.split(sep)
-                    folder_name = parts[0] if len(parts) > 1 else "default"
-                    
-                    target_token = self.identity_manager.get_token(folder_name)
-                    # Keep original folder for singleton items in root or shallow nesting (len <= 1)
-                    if len(parts) <= 1:
-                        target_token = None
+                from monai_aegis.transforms.utility import resolve_target_token
+                target_token = resolve_target_token(
+                    uri=uri,
+                    identity_manager=self.identity_manager,
+                    input_dir=self.input_dir,
+                    fs=self.fs,
+                )
 
                 meta_tensor = self.transform(uri, dataset=ds, fs=self.fs)
                 d[key] = meta_tensor
@@ -483,29 +472,18 @@ class LoadImaged(MapTransform):
         Raises:
             ImageLoadError: If any image file cannot be read.
         """
-        import os
         d = dict(data)
         for key in self.key_iterator(d):
             uri = str(d[key])
             try:
-                # 1. Target Token Generation using Top-Level Folder
-                rel_path = uri
-                if hasattr(self, 'input_dir') and self.input_dir:
-                    if self.fs is not None:
-                        rel_path = self.fs.relpath(uri, self.input_dir)
-                    else:
-                        rel_path = os.path.relpath(uri, self.input_dir)
-                
-                sep = '/' if self.fs is not None else os.sep
-                parts = rel_path.split(sep)
-                folder_name = parts[0] if len(parts) > 1 else "default"
-                
-                target_token = self.identity_manager.get_token(folder_name)
-                # Keep original folder for singleton items in root or shallow nesting (len <= 1)
-                if len(parts) <= 1:
-                    target_token = None
-                    
-                # 2. Proceed with normal loading
+                from monai_aegis.transforms.utility import resolve_target_token
+                target_token = resolve_target_token(
+                    uri=uri,
+                    identity_manager=self.identity_manager,
+                    input_dir=self.input_dir,
+                    fs=self.fs,
+                )
+
                 meta_tensor = self.transform(uri, fs=self.fs)
                 d[key] = meta_tensor
                 d[f"{key}_meta_dict"] = meta_tensor.meta
