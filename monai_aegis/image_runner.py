@@ -7,7 +7,9 @@ import os
 import shutil
 import traceback
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, Iterable
 
 from monai.data import DataLoader, Dataset
 
@@ -17,6 +19,34 @@ from monai_aegis.transforms.discovery import discover_images
 from monai_aegis.transforms.pipeline import build_image_pipeline, build_image_series_pipeline
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RunnerPaths:
+    config_path: str
+    input_dir: str
+    output_dir: str
+    not_processed_dir: str
+    pipeline_input_dir: str
+
+
+@dataclass
+class RunSummary:
+    processed: int = 0
+    not_processed: int = 0
+    errors: int = 0
+    series: int = 0
+    slices: int = 0
+
+
+def _require_config_value(config: dict[str, Any], section: str, key: str) -> str:
+    section_data = config.get(section)
+    if not isinstance(section_data, dict) or key not in section_data:
+        raise KeyError(f"Missing required config value: {section}.{key}")
+    value = section_data[key]
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Config value must be a non-empty string: {section}.{key}")
+    return value
 
 
 def simple_collate(batch):
@@ -43,26 +73,147 @@ class SafeTransformPipeline:
             return data
 
 
-def run_single(config_path: str) -> None:
+def _build_runner_paths(config_path: str, folder_key: str) -> tuple[dict[str, Any], AegisFileSystem, RunnerPaths]:
     config = load_config(config_path)
-    paths = config.get("paths", {})
-    input_dir = paths.get("input_dir", "staging_input")
-    base_output_dir = paths.get("output_dir", "staging_output")
-    not_processed_dir = paths.get("not_processed_dir", "staging_not_processed")
-    image_folder = paths.get("image_folder", "image")
+    input_dir = _require_config_value(config, "paths", "input_dir")
+    base_output_dir = _require_config_value(config, "paths", "output_dir")
+    not_processed_dir = _require_config_value(config, "paths", "not_processed_dir")
+    folder_name = _require_config_value(config, "paths", folder_key)
+    timestamp_format = _require_config_value(config, "paths", "timestamp_format")
+    timestamp_str = datetime.now().strftime(timestamp_format)
+    output_dir = os.path.join(base_output_dir, folder_name, timestamp_str)
 
-    timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    output_dir = os.path.join(base_output_dir, image_folder, timestamp_str)
-
-    config_path = os.path.abspath(config_path)
+    normalized_config_path = os.path.abspath(config_path)
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(not_processed_dir, exist_ok=True)
-
     fs = AegisFileSystem.from_config(config)
-    pipeline_input_dir = os.path.join(input_dir, image_folder)
+
+    return config, fs, RunnerPaths(
+        config_path=normalized_config_path,
+        input_dir=input_dir,
+        output_dir=output_dir,
+        not_processed_dir=not_processed_dir,
+        pipeline_input_dir=os.path.join(input_dir, folder_name),
+    )
+
+
+def _run_dataloader(data_list: list[dict[str, Any]], pipeline: Any, num_workers: int) -> Iterable[dict[str, Any]]:
+    dataset = Dataset(data=data_list, transform=SafeTransformPipeline(pipeline))
+    dataloader = DataLoader(
+        dataset,
+        batch_size=1,
+        num_workers=num_workers,
+        collate_fn=simple_collate,
+    )
+    for batch in dataloader:
+        yield from batch
+
+
+def _resolve_file_path(data_dict: dict[str, Any]) -> str:
+    file_path = data_dict.get("file_path", data_dict.get("image", "unknown"))
+    if not isinstance(file_path, str) and hasattr(file_path, "meta"):
+        file_path = file_path.meta.get("filename_or_obj", "unknown")
+    return str(file_path)
+
+
+def _resolve_rel_path(data_dict: dict[str, Any], paths: RunnerPaths, file_path: str) -> str:
+    rel_path = data_dict.get("rel_path")
+    if rel_path:
+        return rel_path
+    return os.path.relpath(file_path, paths.pipeline_input_dir)
+
+
+def _quarantine_file(file_path: str, rel_path: str, paths: RunnerPaths, reason: str) -> None:
+    if not isinstance(file_path, str) or file_path == "unknown":
+        return
+    dest = os.path.join(paths.not_processed_dir, rel_path)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    try:
+        shutil.copy2(file_path, dest)
+        logger.warning("%s: %s -> %s", reason, rel_path, dest)
+    except Exception:
+        logger.warning("%s: %s", reason, rel_path)
+
+
+def _quarantine_many(files: Iterable[str], paths: RunnerPaths, reason: str) -> None:
+    for file_path in files:
+        if isinstance(file_path, str):
+            rel_path = os.path.relpath(file_path, paths.pipeline_input_dir)
+            _quarantine_file(file_path, rel_path, paths, reason)
+
+
+def _cleanup_output(data_dict: dict[str, Any], paths: RunnerPaths, rel_path: str) -> None:
+    out_path = data_dict.get("image_saved_path")
+    if not out_path:
+        filename = os.path.basename(rel_path)
+        out_path = os.path.join(paths.output_dir, filename.rsplit(".", 1)[0] + ".png")
+    if os.path.exists(out_path):
+        os.remove(out_path)
+
+
+def _handle_error_result(data_dict: dict[str, Any], paths: RunnerPaths, summary: RunSummary, reason: str) -> bool:
+    if "error" not in data_dict:
+        return False
+    summary.errors += 1
+    image_value = data_dict.get("image", [])
+    if isinstance(image_value, list):
+        _quarantine_many(image_value, paths, reason)
+    else:
+        file_path = _resolve_file_path(data_dict)
+        rel_path = _resolve_rel_path(data_dict, paths, file_path)
+        _quarantine_file(file_path, rel_path, paths, reason)
+    return True
+
+
+def _handle_single_result(
+    data_dict: dict[str, Any],
+    paths: RunnerPaths,
+    summary: RunSummary,
+    count_as_processed: str,
+) -> None:
+    file_path = _resolve_file_path(data_dict)
+    if file_path == "unknown":
+        return
+    rel_path = _resolve_rel_path(data_dict, paths, file_path)
+    stats_dict = data_dict.get("image_redaction_stats", {})
+    low_conf = stats_dict.get("low_confidence_count", 0)
+
+    if low_conf > 0:
+        _quarantine_file(file_path, rel_path, paths, "NOT PROCESSED")
+        _cleanup_output(data_dict, paths, rel_path)
+        summary.not_processed += 1
+        return
+
+    logger.info("Processed: %s", rel_path)
+    if count_as_processed == "processed":
+        summary.processed += 1
+    else:
+        summary.slices += 1
+
+
+def _log_single_summary(summary: RunSummary) -> None:
+    logger.info(
+        "Single-file image processing complete. Processed: %d | Not processed: %d | Errors: %d",
+        summary.processed,
+        summary.not_processed,
+        summary.errors,
+    )
+
+
+def _log_series_summary(summary: RunSummary) -> None:
+    logger.info(
+        "Image series processing complete. Folders: %d | Images: %d | Errors: %d",
+        summary.series,
+        summary.slices,
+        summary.errors,
+    )
+
+
+def run_single(config_path: str) -> None:
+    _config, fs, paths = _build_runner_paths(config_path, "image_folder")
 
     image_files = []
-    walker = fs.walk(pipeline_input_dir) if fs.protocol != "file" else os.walk(pipeline_input_dir)
+    walker = fs.walk(paths.pipeline_input_dir) if fs.protocol != "file" else os.walk(paths.pipeline_input_dir)
     for root, _dirs, filenames in walker:
         for filename in filenames:
             if filename.lower().endswith((".jpg", ".jpeg", ".png")):
@@ -71,105 +222,40 @@ def run_single(config_path: str) -> None:
     image_files.sort()
 
     if not image_files:
-        logger.warning("No image files found in %s", pipeline_input_dir)
+        logger.warning("No image files found in %s", paths.pipeline_input_dir)
         return
 
     pipeline = build_image_pipeline(
-        config_path=config_path,
-        output_dir=output_dir,
-        input_dir=pipeline_input_dir,
+        config_path=paths.config_path,
+        output_dir=paths.output_dir,
+        input_dir=paths.pipeline_input_dir,
     )
 
-    processed = 0
-    not_processed = 0
-    errors = 0
+    summary = RunSummary()
     data_list = []
     for file_path in image_files:
-        rel_path = os.path.relpath(file_path, input_dir)
+        rel_path = os.path.relpath(file_path, paths.input_dir)
         data_list.append({"image": file_path, "file_path": file_path, "rel_path": rel_path})
 
-    dataset = Dataset(data=data_list, transform=SafeTransformPipeline(pipeline))
-    dataloader = DataLoader(
-        dataset,
-        batch_size=1,
+    for data_dict in _run_dataloader(
+        data_list,
+        pipeline,
         num_workers=min(4, os.cpu_count() or 1),
-        collate_fn=simple_collate,
-    )
+    ):
+        if _handle_error_result(data_dict, paths, summary, "NOT PROCESSED (ERROR)"):
+            continue
+        _handle_single_result(data_dict, paths, summary, count_as_processed="processed")
 
-    for batch in dataloader:
-        for data_dict in batch:
-            if "error" in data_dict:
-                errors += 1
-                rel_path = data_dict.get("rel_path", "unknown")
-                file_path = data_dict.get("file_path", rel_path)
-                if isinstance(file_path, str) and file_path != "unknown":
-                    dest = os.path.join(not_processed_dir, rel_path)
-                    os.makedirs(os.path.dirname(dest), exist_ok=True)
-                    try:
-                        shutil.copy2(file_path, dest)
-                        logger.warning("NOT PROCESSED (ERROR): %s -> %s", rel_path, dest)
-                    except Exception:
-                        pass
-                continue
-
-            rel_path = data_dict.get("rel_path", "unknown")
-            file_path = data_dict.get("file_path", rel_path)
-            stats_dict = data_dict.get("image_redaction_stats", {})
-            low_conf = stats_dict.get("low_confidence_count", 0)
-
-            if low_conf > 0:
-                dest = os.path.join(not_processed_dir, rel_path)
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                shutil.copy2(file_path, dest)
-                logger.warning(
-                    "NOT PROCESSED: %s - %d low-confidence regions -> %s",
-                    rel_path,
-                    low_conf,
-                    dest,
-                )
-                not_processed += 1
-
-                out_path = data_dict.get("image_saved_path")
-                if not out_path:
-                    filename = os.path.basename(rel_path)
-                    out_path = os.path.join(output_dir, filename.rsplit(".", 1)[0] + ".png")
-                if os.path.exists(out_path):
-                    os.remove(out_path)
-                continue
-
-            logger.info("Processed: %s", rel_path)
-            processed += 1
-
-    logger.info(
-        "Single-file image processing complete. Processed: %d | Not processed: %d | Errors: %d",
-        processed,
-        not_processed,
-        errors,
-    )
+    _log_single_summary(summary)
 
 
 def run_series(config_path: str) -> None:
-    config = load_config(config_path)
-    paths = config.get("paths", {})
-    input_dir = paths.get("input_dir", "staging_input")
-    base_output_dir = paths.get("output_dir", "staging_output")
-    not_processed_dir = paths.get("not_processed_dir", "staging_not_processed")
-    image_folder = paths.get("image_folder", "image")
+    _config, fs, paths = _build_runner_paths(config_path, "image_folder")
 
-    timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    output_dir = os.path.join(base_output_dir, image_folder, timestamp_str)
-
-    config_path = os.path.abspath(config_path)
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(not_processed_dir, exist_ok=True)
-
-    fs = AegisFileSystem.from_config(config)
-    pipeline_input_dir = os.path.join(input_dir, image_folder)
-
-    image_files = discover_images(pipeline_input_dir, fs=fs)
+    image_files = discover_images(paths.pipeline_input_dir, fs=fs)
     if not image_files:
         logger.warning("No image files found. Falling back to single-file mode.")
-        run_single(config_path)
+        run_single(paths.config_path)
         return
 
     folder_groups = defaultdict(list)
@@ -178,15 +264,15 @@ def run_series(config_path: str) -> None:
         folder_groups[parent_dir].append(file_path)
 
     pipeline = build_image_series_pipeline(
-        config_path=config_path,
-        output_dir=output_dir,
-        input_dir=pipeline_input_dir,
+        config_path=paths.config_path,
+        output_dir=paths.output_dir,
+        input_dir=paths.pipeline_input_dir,
         output_ext=".png",
     )
     pipeline_single = build_image_pipeline(
-        config_path=config_path,
-        output_dir=output_dir,
-        input_dir=pipeline_input_dir,
+        config_path=paths.config_path,
+        output_dir=paths.output_dir,
+        input_dir=paths.pipeline_input_dir,
         output_ext=".png",
     )
 
@@ -196,9 +282,9 @@ def run_series(config_path: str) -> None:
         label = os.path.basename(parent_dir) if fs.protocol == "file" else fs.basename(parent_dir)
         if len(folder_images) == 1:
             rel_path = (
-                folder_images[0][len(pipeline_input_dir):].lstrip("/")
+                folder_images[0][len(paths.pipeline_input_dir):].lstrip("/")
                 if fs.protocol != "file"
-                else os.path.relpath(folder_images[0], pipeline_input_dir)
+                else os.path.relpath(folder_images[0], paths.pipeline_input_dir)
             )
             singletons_data.append(
                 {
@@ -211,106 +297,43 @@ def run_series(config_path: str) -> None:
         else:
             series_data.append({"image": folder_images, "label": label, "num_slices": len(folder_images)})
 
-    series_count = 0
-    total_slices = 0
-    errors = 0
+    summary = RunSummary()
 
     if singletons_data:
-        ds_single = Dataset(data=singletons_data, transform=SafeTransformPipeline(pipeline_single))
-        dl_single = DataLoader(
-            ds_single,
-            batch_size=1,
+        for data_dict in _run_dataloader(
+            singletons_data,
+            pipeline_single,
             num_workers=min(4, os.cpu_count() or 1),
-            collate_fn=simple_collate,
-        )
-        for batch in dl_single:
-            for data_dict in batch:
-                if "error" in data_dict:
-                    errors += 1
-                    file_path = data_dict.get("file_path", data_dict.get("image", "unknown"))
-                    rel_path = data_dict.get("rel_path", "unknown")
-                    if isinstance(file_path, str) and file_path != "unknown":
-                        dest = os.path.join(not_processed_dir, rel_path)
-                        os.makedirs(os.path.dirname(dest), exist_ok=True)
-                        try:
-                            shutil.copy2(file_path, dest)
-                            logger.warning("NOT PROCESSED (ERROR): %s -> %s", rel_path, dest)
-                        except Exception:
-                            pass
-                    continue
-
-                file_path = data_dict.get("file_path", data_dict.get("image", "unknown"))
-                if not isinstance(file_path, str) and hasattr(file_path, "meta"):
-                    file_path = file_path.meta.get("filename_or_obj", "unknown")
-                rel_path = data_dict.get("rel_path", "unknown")
-                stats_dict = data_dict.get("image_redaction_stats", {})
-                low_conf = stats_dict.get("low_confidence_count", 0)
-
-                if low_conf > 0:
-                    dest = os.path.join(not_processed_dir, rel_path)
-                    os.makedirs(os.path.dirname(dest), exist_ok=True)
-                    shutil.copy2(file_path, dest)
-                    logger.warning(
-                        "NOT PROCESSED: %s - %d low-confidence regions -> %s",
-                        rel_path,
-                        low_conf,
-                        dest,
-                    )
-                    out_path = data_dict.get("image_saved_path")
-                    if not out_path:
-                        filename = os.path.basename(rel_path)
-                        out_path = os.path.join(output_dir, filename.rsplit(".", 1)[0] + ".png")
-                    if os.path.exists(out_path):
-                        os.remove(out_path)
-                else:
-                    total_slices += 1
+        ):
+            if _handle_error_result(data_dict, paths, summary, "NOT PROCESSED (ERROR)"):
+                continue
+            _handle_single_result(data_dict, paths, summary, count_as_processed="slices")
 
     if series_data:
-        ds_series = Dataset(data=series_data, transform=SafeTransformPipeline(pipeline))
-        dl_series = DataLoader(
-            ds_series,
-            batch_size=1,
+        for data_dict in _run_dataloader(
+            series_data,
+            pipeline,
             num_workers=min(4, os.cpu_count() or 1),
-            collate_fn=simple_collate,
-        )
-        for batch in dl_series:
-            for data_dict in batch:
-                label = data_dict.get("label", "unknown")
-                if "error" in data_dict:
-                    logger.error("Error processing folder %s", label)
-                    errors += 1
-                    for file_path in data_dict.get("image", []):
-                        if isinstance(file_path, str):
-                            rel_path = os.path.relpath(file_path, pipeline_input_dir)
-                            dest = os.path.join(not_processed_dir, rel_path)
-                            os.makedirs(os.path.dirname(dest), exist_ok=True)
-                            try:
-                                shutil.copy2(file_path, dest)
-                            except Exception:
-                                pass
-                    logger.warning("NOT PROCESSED (ERROR): Series %s -> %s", label, not_processed_dir)
-                    continue
+        ):
+            label = data_dict.get("label", "unknown")
+            if _handle_error_result(data_dict, paths, summary, f"NOT PROCESSED (ERROR): Series {label}"):
+                continue
 
-                stats_dict = data_dict.get("image_redaction_stats", {})
-                strategy = stats_dict.get("volume_strategy", "unknown")
-                num_slices = data_dict.get("num_slices", 0)
+            stats_dict = data_dict.get("image_redaction_stats", {})
+            strategy = stats_dict.get("volume_strategy", "unknown")
+            num_slices = data_dict.get("num_slices", 0)
 
-                logger.info(
-                    "Folder %s complete: strategy=%s, redacted=%d",
-                    label,
-                    strategy,
-                    stats_dict.get("redacted_count", 0),
-                )
+            logger.info(
+                "Folder %s complete: strategy=%s, redacted=%d",
+                label,
+                strategy,
+                stats_dict.get("redacted_count", 0),
+            )
 
-                series_count += 1
-                total_slices += num_slices
+            summary.series += 1
+            summary.slices += num_slices
 
-    logger.info(
-        "Image series processing complete. Folders: %d | Images: %d | Errors: %d",
-        series_count,
-        total_slices,
-        errors,
-    )
+    _log_series_summary(summary)
 
 
 def main() -> None:
@@ -341,4 +364,3 @@ def main() -> None:
 
 
 __all__ = ["main", "run_series", "run_single"]
-
