@@ -29,6 +29,7 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **DICOM pipeline** (`monai_aegis.dicom_runner`) — DICOM single-file or series-aware volume mode
 - **Image pipeline** (`monai_aegis.image_runner`) — JPEG/PNG single-file or series-aware folder processing
 - **Unified orchestrator** (`monai_aegis.cli`) — `--mode auto|dicom|image`
+- **Thin orchestration layer** — runners resolve config/paths, execute DataLoaders, quarantine failures, and summarize results
 - **Independent scaling** — each pipeline can run on separate infrastructure
 
 ### Cloud Storage (fsspec)
@@ -46,6 +47,7 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **Four pipeline modes**: DICOM single (`build_pipeline`), DICOM series (`build_series_pipeline`), Image single (`build_image_pipeline`), and Image series (`build_image_series_pipeline`)
 - **Shared pixel redaction** — `RedactPixelPHId` is format-agnostic, used across all pipelines
 - **Destructive redaction** — `RedactPixelPHId` permanently zeros PHI pixels and exposes redaction masks/stats as side outputs
+- **Normalized tokenization contract** — loaders tokenize only the first folder level below `paths.input_dir`; files directly under the input root keep their original layout
 - **Safety lock** — warns when prior spatial transforms may compromise OCR accuracy
 - **Thread-safe by design** — only save transforms are `ThreadUnsafe`
 - **Non-destructive** — input files remain unchanged
@@ -134,11 +136,11 @@ flowchart TD
     save --> out_proc
 ```
 
-An architectural priority is **strict I/O separation**, allowing the pipeline to scale efficiently across workers and cloud storage. All I/O flows through `AegisFileSystem` (fsspec) for cloud-native reads/writes. The pipeline is split into three explicit zones:
+An architectural priority is **strict I/O separation**. All I/O flows through `AegisFileSystem` (fsspec) for cloud-native reads/writes, while transform logic stays in-memory. The pipeline is split into three explicit zones:
 
 ### 1. Ingestion Zone (Single Read)
-* **DICOM Load (`LoadDicomRawd`)**: Reads DICOM files into a MONAI `MetaTensor`, caches the `pydicom.Dataset` in memory, and enriches `MetaTensor.meta` with `modality`, `patient_id`, `study_date`.
-* **Image Load (`LoadImaged`)**: Reads JPEG/PNG files into a channel-first `MetaTensor`. No DICOM metadata.
+* **DICOM Load (`LoadDicomRawd` / `LoadDicomSeriesd`)**: Reads single DICOMs or validated series into a MONAI `MetaTensor`, caches the source `pydicom.Dataset` objects in memory, and enriches `MetaTensor.meta` with acquisition metadata.
+* **Image Load (`LoadImaged` / `LoadImageSeriesd`)**: Reads JPEG/PNG files into channel-first `MetaTensor` objects. Image-series loading validates geometry before stacking.
 * Both use `AegisFileSystem` byte streams for cloud storage compatibility.
 
 ### 2. Logic Zone (Purely In-Memory)
@@ -149,6 +151,7 @@ An architectural priority is **strict I/O separation**, allowing the pipeline to
    
    A binary **redaction mask** (matched to the MetaTensor's `spatial_shape`) is generated from PHI detections and stored alongside the output image for downstream review. Images with low OCR confidence bypass this step and are routed to `staging_not_processed/` for manual review. A **safety lock** warns if prior spatial transforms may compromise OCR accuracy. When `ner.enabled: false`, the system falls back to regex safelist matching.
 * **Scrub (`ScrubDicomMetadatad`)**: A pure in-memory metadata scrubber (primarily for DICOMs). It works entirely on the cached `pydicom.Dataset` from the Ingestion Zone without hitting the disk again. It calls `AegisIdentityManager` to perform deterministic tokenization, dummy replacement, or removal of designated DICOM tags.
+* **Runner orchestration (`monai_aegis.dicom_runner` / `monai_aegis.image_runner`)**: Config and path resolution, DataLoader execution, quarantine routing to `paths.not_processed_dir`, output cleanup, and run summaries live outside the transform graph.
 
 ### 3. Persistence Zone (Single Write)
 * **DICOM Save (`SaveDicomd` / `SaveDicomSeriesd`)**: Writes de-identified DICOM datasets. `ThreadUnsafe`.
@@ -263,9 +266,9 @@ classDiagram
     SaveImageSeriesd --|> ThreadUnsafe
 ```
 
-The pipeline is intentionally designed around multithreading bottlenecks and file I/O safety when operating within a PyTorch `DataLoader(num_workers > 0)`.
+The transform graph is designed to keep heavy OCR and metadata work in-memory while isolating filesystem writes. The runner controls `DataLoader` concurrency via `runtime.dataloader_num_workers`.
 
-* **Concurrent Processing**: Steps 1–3 (`Load`, `Redact`, `Scrub`) are entirely thread-safe and operate purely in-memory. By pushing the heavy OCR computation to parallel background workers, the pipeline scales across CPU cores.
+* **Configurable Processing Model**: Steps 1–3 (`Load`, `Redact`, `Scrub`) are thread-safe, but worker count is now an explicit runtime setting. In constrained environments, `runtime.dataloader_num_workers: 0` avoids Torch shared-memory failures; higher values can be enabled where multiprocessing is safe.
 * **Thread-Local Isolation**: To prevent locking issues and race conditions with stateful AI models, `RedactPixelPHId` utilizes Python's `threading.local()`. This guarantees every worker thread spins up its own isolated EasyOCR reader and NER classifier instances.
 * **I/O Isolation for Safety**: The pipeline intentionally marks **Step 4 (`SaveDicomd`)** as `ThreadUnsafe`. MONAI detects this and routes all dataset saving sequential actions to the main thread. This prevents file locking contentions, HDD thrashing, and ensures files uniquely derived from their source are written securely without race conditions.
 
@@ -288,7 +291,7 @@ The pipeline is intentionally designed around multithreading bottlenecks and fil
 ## 📦 Installation
 
 ### Prerequisites
-- Python 3.8+
+- Python 3.10+
 - Virtual environment recommended
 
 ### Install Package
@@ -324,8 +327,8 @@ python -m monai_aegis.image_runner --config monai_aegis/config/config.yaml --mod
 aegis-pipeline --config monai_aegis/config/config.yaml --mode auto
 
 # Output:
-#   Processed files → staging_output/dicom/YYYY-MM-DD/ or staging_output/image/YYYY-MM-DD/
-#   Low-confidence files → staging_not_processed/ (manual review)
+#   Processed files → staging_output/dicom/<timestamp>/ or staging_output/image/<timestamp>/
+#   Rejected/flagged files → staging_not_processed/ (manual review, geometry mismatch, or transform errors)
 ```
 
 ---
@@ -341,13 +344,17 @@ paths:
   not_processed_dir: '${AEGIS_REVIEW_DIR:staging_not_processed}'
   dicom_folder: 'dicom'
   image_folder: 'image'
+  timestamp_format: '%Y-%m-%d_%H-%M'
+
+runtime:
+  dataloader_num_workers: 0
 
 storage:
   protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file, s3, gs, az
   options: {}                                   # fsspec options (credentials, etc.)
 
 tokenization:
-  salt: '${AEGIS_TOKEN_SALT:default_dev_salt_string}'
+  salt: '${AEGIS_TOKEN_SALT:}'
 
 series:
   enabled: true
@@ -393,6 +400,8 @@ pii_mapping:
   '(0008, 0050)': 'REMOVE'  # AccessionNumber → removed
 ```
 
+Tokenization now follows one rule across single-file and series loaders: if a file sits directly under `paths.input_dir/<dicom_folder|image_folder>`, output stays at the root; otherwise the first relative folder segment is replaced by a deterministic token.
+
 ### Cloud Storage (S3 / GCS / Azure)
 
 ```yaml
@@ -412,7 +421,7 @@ paths:
 # Apply overlay via environment variable
 export AEGIS_CONFIG_OVERRIDE=config.prod.yaml
 pip install s3fs  # one-time
-python -m monai_aegis.dicom_runner
+python -m monai_aegis.dicom_runner --config monai_aegis/config/config.yaml
 ```
 
 | Backend | Protocol | Extra Package |
@@ -445,7 +454,7 @@ When `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline
 ## 🧪 Testing
 
 ```bash
-# Run all 97 unit tests
+# Run unit tests
 python -m unittest discover tests/unit -v
 
 # Run integration tests
@@ -461,6 +470,9 @@ python -m unittest discover tests/integration -v
 aegis/
 ├── monai_aegis/                      # Installable package
 │   ├── pyproject.toml                # PEP 621 package config
+│   ├── cli.py                        # aegis-pipeline entry point
+│   ├── dicom_runner.py               # Packaged DICOM orchestration
+│   ├── image_runner.py               # Packaged image orchestration
 │   ├── config/
 │   │   ├── config.yaml               # De-identification + NER + storage + series settings
 │   │   ├── config_loader.py          # Env var interpolation + overlay merging
@@ -474,15 +486,16 @@ aegis/
 │       ├── ner_classifier.py          # PHIClassifier (Stanford NER wrapper)
 │       ├── metadata.py                # ScrubDicomMetadata/d (single + series scrub)
 │       ├── exceptions.py              # Custom exception hierarchy
-│       ├── utility.py                 # AegisIdentityManager (tokenization)
-│       └── pipeline.py                # build_pipeline / build_series_pipeline / build_image_pipeline
+│       ├── utility.py                 # AegisIdentityManager + tokenized output path helpers
+│       └── pipeline.py                # build_pipeline / build_series_pipeline / build_image_pipeline / build_image_series_pipeline
 ├── tests/
-│   ├── unit/                          # 97 unit tests (13 test files)
+│   ├── unit/                          # Unit tests
 │   │   ├── test_config_loader.py      # Config loading, env vars, overlays
 │   │   ├── test_storage.py            # AegisFileSystem, fsspec, byte-stream round-trip
 │   │   ├── test_raw_loader.py         # DICOM + image loading transforms
 │   │   ├── test_discovery.py          # Discovery, grouping, validation, sorting
 │   │   ├── test_series_io.py          # Series load/save transforms
+│   │   ├── test_image_series_io.py    # Image series load/save + tokenization
 │   │   ├── test_volume_redaction.py   # Volume keyframe OCR
 │   │   └── ...                        # Additional test files
 │   └── integration/                   # End-to-end tests
