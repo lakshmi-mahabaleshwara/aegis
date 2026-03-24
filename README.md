@@ -66,7 +66,7 @@ flowchart TD
     classDef output fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000;
     classDef config fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000;
     classDef decision fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#000;
-    classDef ioZone fill:#eceff1,stroke:#607d8b,stroke-width:2px,stroke-dasharray: 5 5,color:#000;
+    classDef cache fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,stroke-dasharray: 5 5,color:#000;
 
     subgraph Inputs ["Inputs"]
         dicom["DICOM Files (.dcm)"]:::input
@@ -77,13 +77,21 @@ flowchart TD
 
     subgraph Pipeline ["Aegis Transform Pipeline"]
         
-        subgraph Ingestion ["INGESTION ZONE (Single Disk Read)"]
-            load["1. Load Transforms\n(LoadDicomRawd / LoadDicomSeriesd / LoadImaged / LoadImageSeriesd)\n(Raw Files → MetaTensor(s))\n<i>Thread-safe</i>"]:::process
+        subgraph Ingestion ["I/O BOUNDARY: FILE READ (One Read per File)"]
+            subgraph dicom_load ["DICOM Load Path"]
+                dcm_read["1a. pydicom.dcmread\n(Parse .dcm → pydicom.Dataset)"]:::process
+                dcm_cache["Cache pydicom.Dataset\nin data dict"]:::cache
+                dcm_pixel["Extract pixel_array\n→ MetaTensor (C,H,W)"]:::process
+            end
+            subgraph image_load ["Image Load Path"]
+                img_read["1b. PIL / Image.open\n(Read .jpg/.png → pixel array)"]:::process
+                img_pixel["→ MetaTensor (C,H,W)"]:::process
+            end
         end
 
-        subgraph Logic ["LOGIC ZONE (Purely In-Memory)"]
+        subgraph Logic ["LOGIC ZONE (Purely In-Memory — Zero Disk Access)"]
             subgraph step2 ["2. RedactPixelPHId <i>(Thread-safe via threading.local)</i>"]
-                ocr["EasyOCR Engine\n(Text Detection)"]:::subProcess
+                ocr["EasyOCR Engine\n(Text Detection on MetaTensor)"]:::subProcess
                 
                 subgraph NER ["PHIClassifier (3-Layer Pipeline)"]
                     direction TB
@@ -95,12 +103,12 @@ flowchart TD
                 action_redact["Apply Black-Box\nRedaction Mask"]:::process
             end
 
-            scrub["3. ScrubDicomMetadatad\n(Processes cached pydicom.Dataset)\n<i>Thread-safe</i>"]:::process
+            scrub["3. ScrubDicomMetadatad\n(Reads cached pydicom.Dataset —\nno disk access)\n<i>Thread-safe</i>"]:::process
             id_manager["AegisIdentityManager\n(Deterministic Tokenization / Hashing)"]:::subProcess
         end
         
-        subgraph Persistence ["PERSISTENCE ZONE (Single Disk Write)"]
-            save["4. Save Transforms\n(SaveDicomd / SaveDicomSeriesd / SaveImaged / SaveImageSeriesd)\n(Write to Disk tokens)\n<i>ThreadUnsafe</i>"]:::process
+        subgraph Persistence ["I/O BOUNDARY: FILE WRITE (One Write per File)"]
+            save["4. Save Transforms\n(SaveDicomd / SaveDicomSeriesd / SaveImaged / SaveImageSeriesd)\n<i>ThreadUnsafe — main thread only</i>"]:::process
         end
     end
 
@@ -112,10 +120,17 @@ flowchart TD
     %% Connections
     config -. "Configures" .-> Pipeline
     
-    dicom -- "staging_input/" --> load
-    img -- "staging_input/" --> load
+    dicom -- "staging_input/" --> dcm_read
+    img -- "staging_input/" --> img_read
+
+    dcm_read --> dcm_cache
+    dcm_read --> dcm_pixel
+    img_read --> img_pixel
     
-    load --> ocr
+    dcm_pixel --> ocr
+    img_pixel --> ocr
+
+    dcm_cache -. "Cached Dataset\n(in-memory)" .-> scrub
     
     ocr -- "Confidence < Threshold" --> out_not_proc
     ocr -- "Confidence ≥ Threshold" --> L1
@@ -136,26 +151,32 @@ flowchart TD
     save --> out_proc
 ```
 
-An architectural priority is **strict I/O separation**. All I/O flows through `AegisFileSystem` (fsspec) for cloud-native reads/writes, while transform logic stays in-memory. The pipeline is split into three explicit zones:
+An architectural priority is **strict I/O separation**. All file I/O flows through `AegisFileSystem` (fsspec) for cloud-native reads/writes, while transform logic stays purely in-memory. The pipeline is split into three explicit zones:
 
-### 1. Ingestion Zone (Single Read)
-* **DICOM Load (`LoadDicomRawd` / `LoadDicomSeriesd`)**: Reads single DICOMs or validated series into a MONAI `MetaTensor`, caches the source `pydicom.Dataset` objects in memory, and enriches `MetaTensor.meta` with acquisition metadata.
-* **Image Load (`LoadImaged` / `LoadImageSeriesd`)**: Reads JPEG/PNG files into channel-first `MetaTensor` objects. Image-series loading validates geometry before stacking.
-* Both use `AegisFileSystem` byte streams for cloud storage compatibility.
+### 1. I/O Boundary: File Read (One Read per File)
 
-### 2. Logic Zone (Purely In-Memory)
-* **Redact (`RedactPixelPHId`)**: A destructive `MapTransform` that uses EasyOCR to detect text, then classifies each detection through a **3-layer pipeline**:
+Each file is read from disk **exactly once** during ingestion. The two format paths differ in what they cache:
+
+* **DICOM Load (`LoadDicomRawd` / `LoadDicomSeriesd`)**: Calls `pydicom.dcmread` to parse the `.dcm` file into a `pydicom.Dataset`, then:
+   * **Caches** the full `pydicom.Dataset` object in the data dict (`{key}_dicom_dataset`) — this is what `ScrubDicomMetadatad` consumes later without any disk access.
+   * **Extracts** `pixel_array` from the Dataset and wraps it into a channel-first MONAI `MetaTensor` (`C, H, W`).
+   * Enriches `MetaTensor.meta` with acquisition metadata (modality, patient ID, study date).
+* **Image Load (`LoadImaged` / `LoadImageSeriesd`)**: Opens JPEG/PNG via PIL, converts to a channel-first `MetaTensor`. No Dataset caching (no metadata to scrub). Image-series loading validates geometry before stacking.
+* Both paths use `AegisFileSystem` byte streams for cloud storage compatibility.
+
+### 2. Logic Zone (Purely In-Memory — Zero Disk Access)
+* **Redact (`RedactPixelPHId`)**: A destructive `MapTransform` that uses EasyOCR to detect text on the `MetaTensor` pixels, then classifies each detection through a **3-layer pipeline**:
    * **(1) Clinical allowlist**: preserves known device/parameter terms.
    * **(2) PHI heuristics**: catch obvious date-IDs and institution names.
    * **(3) Stanford NER**: the `stanford-deidentifier-base` model provides semantic classification for remaining text.
    
    A binary **redaction mask** (matched to the MetaTensor's `spatial_shape`) is generated from PHI detections and stored alongside the output image for downstream review. Images with low OCR confidence bypass this step and are routed to `staging_not_processed/` for manual review. A **safety lock** warns if prior spatial transforms may compromise OCR accuracy. When `ner.enabled: false`, the system falls back to regex safelist matching.
-* **Scrub (`ScrubDicomMetadatad`)**: A pure in-memory metadata scrubber (primarily for DICOMs). It works entirely on the cached `pydicom.Dataset` from the Ingestion Zone without hitting the disk again. It calls `AegisIdentityManager` to perform deterministic tokenization, dummy replacement, or removal of designated DICOM tags.
+* **Scrub (`ScrubDicomMetadatad`)**: A pure in-memory metadata scrubber for DICOMs. It reads the **cached `pydicom.Dataset`** written by the Ingestion Zone — no second disk read occurs. It injects the redacted pixel data into the Dataset and calls `AegisIdentityManager` to perform deterministic tokenization, dummy replacement, or removal of designated DICOM tags. Skipped entirely for JPEG/PNG files.
 * **Runner orchestration (`monai_aegis.dicom_runner` / `monai_aegis.image_runner`)**: Config and path resolution, DataLoader execution, quarantine routing to `paths.not_processed_dir`, output cleanup, and run summaries live outside the transform graph.
 
-### 3. Persistence Zone (Single Write)
-* **DICOM Save (`SaveDicomd` / `SaveDicomSeriesd`)**: Writes de-identified DICOM datasets. `ThreadUnsafe`.
-* **Image Save (`SaveImaged`)**: Converts channel-first tensors back to HWC, normalizes to uint8, and writes PNG/JPEG. `ThreadUnsafe`.
+### 3. I/O Boundary: File Write (One Write per File)
+* **DICOM Save (`SaveDicomd` / `SaveDicomSeriesd`)**: Writes de-identified DICOM datasets. `ThreadUnsafe` — MONAI routes all writes to the main thread.
+* **Image Save (`SaveImaged` / `SaveImageSeriesd`)**: Converts channel-first tensors back to HWC, normalizes to uint8, and writes PNG/JPEG. `ThreadUnsafe`.
 
 ### Component Interaction & Thread Safety Model
 

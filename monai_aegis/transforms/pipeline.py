@@ -59,7 +59,7 @@ def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str =
 
     return Compose([
         # ==========================================
-        # INGESTION ZONE: Single Disk Read
+        # I/O BOUNDARY: FILE READ (One Read per File)
         # ==========================================
         # Load file and cache pydicom.Dataset in-memory
         LoadDicomRawd(keys=keys, config=config, input_dir=input_dir, fs=fs),
@@ -75,7 +75,7 @@ def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str =
         ScrubDicomMetadatad(keys=keys, config=config),
 
         # ==========================================
-        # PERSISTENCE ZONE: Single Disk Write
+        # I/O BOUNDARY: FILE WRITE (One Write per File)
         # ==========================================
         # Save scrubbed DICOM to disk
         SaveDicomd(keys=keys, output_dir=output_dir, input_dir=input_dir, fs=fs),
