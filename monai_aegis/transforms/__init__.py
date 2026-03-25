@@ -25,6 +25,7 @@ Example::
 from monai_aegis.transforms.io import LoadDicomRaw, LoadDicomRawd, SaveDicom, SaveDicomd
 from monai_aegis.transforms.series_io import LoadDicomSeries, LoadDicomSeriesd, SaveDicomSeries, SaveDicomSeriesd
 from monai_aegis.transforms.pixel import RedactPixelPHI, RedactPixelPHId
+from monai_aegis.transforms.us_regions import RedactByUSRegions, RedactByUSRegionsd
 from monai_aegis.transforms.metadata import ScrubDicomMetadata, ScrubDicomMetadatad
 from monai_aegis.transforms.utility import AegisIdentityManager
 from monai_aegis.transforms.ner_classifier import PHIClassifier
@@ -62,6 +63,9 @@ __all__ = [
     # Pixel Redaction
     "RedactPixelPHI",
     "RedactPixelPHId",
+    # US Region Masking
+    "RedactByUSRegions",
+    "RedactByUSRegionsd",
     # Metadata Scrubbing
     "ScrubDicomMetadata",
     "ScrubDicomMetadatad",

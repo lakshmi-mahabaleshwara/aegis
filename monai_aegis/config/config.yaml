@@ -25,6 +25,10 @@ series:
   keyframe_count: 3
   output_structure: 'hierarchical'  # 'hierarchical' = StudyUID/SeriesUID/
 
+us_regions:
+  enabled: true                # Enable US fan-geometry scoped OCR
+  zero_outside_regions: true   # Zero diagnostic pixels before OCR
+
 ocr:
   decoder: 'beamsearch'
   beam_width: 5

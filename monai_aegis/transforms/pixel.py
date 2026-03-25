@@ -451,11 +451,40 @@ class RedactPixelPHId(MapTransform):
                 else:
                     pixel_array = np.array(input_tensor)
 
-                # Apply array transform
+                # --- US Region Mask: scope OCR to PHI zones only ---
+                us_phi_mask = d.get(f"{key}_us_phi_mask")
+                if us_phi_mask is not None:
+                    # Mask the diagnostic region before OCR so EasyOCR
+                    # only processes the annotation/overlay areas.
+                    original_pixels = pixel_array.copy()
+                    # Zero out diagnostic pixels (mask=False) across all channels
+                    if pixel_array.ndim == 3:
+                        # (C, H, W) — broadcast mask over channels
+                        pixel_array = pixel_array.copy()
+                        pixel_array[:, ~us_phi_mask] = 0
+                    elif pixel_array.ndim == 4:
+                        # (C, D, H, W) — broadcast mask over channels and depth
+                        pixel_array = pixel_array.copy()
+                        pixel_array[:, :, ~us_phi_mask] = 0
+                    logger.info(
+                        "US PHI mask applied: OCR scoped to %d%% of frame",
+                        int(100 * us_phi_mask.sum() / us_phi_mask.size),
+                    )
+
+                # Apply array transform (OCR + redaction)
                 redacted = self.transform(pixel_array)
+
+                # --- Restore diagnostic region pixels after OCR ---
+                if us_phi_mask is not None:
+                    if redacted.ndim == 3:
+                        redacted[:, ~us_phi_mask] = original_pixels[:, ~us_phi_mask]
+                    elif redacted.ndim == 4:
+                        redacted[:, :, ~us_phi_mask] = original_pixels[:, :, ~us_phi_mask]
 
                 # Store redaction stats for downstream routing
                 stats = getattr(self.transform, 'last_stats', {})
+                if us_phi_mask is not None:
+                    stats['us_region_mask_applied'] = True
                 d[f"{key}_redaction_stats"] = stats
 
                 # Generate binary redaction mask matched to spatial_shape
@@ -464,10 +493,11 @@ class RedactPixelPHId(MapTransform):
                 bboxes = getattr(self.transform, 'last_stats', {}).get('_bboxes', [])
 
                 # Recompute mask from the difference between original and redacted
-                if pixel_array.ndim == 3:
-                    diff = np.any(pixel_array != redacted, axis=0)
+                compare_src = original_pixels if us_phi_mask is not None else pixel_array
+                if compare_src.ndim == 3:
+                    diff = np.any(compare_src != redacted, axis=0)
                 else:
-                    diff = pixel_array != redacted
+                    diff = compare_src != redacted
                 redaction_mask = diff.astype(np.uint8)
                 d[f"{key}_redaction_mask"] = redaction_mask
 

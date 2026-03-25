@@ -20,6 +20,7 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **Stanford NER-based PHI detection** — semantic classification via `stanford-deidentifier-base` (F1 ≥ 97.9%)
 - **3-layer classification pipeline**: clinical allowlist → PHI heuristics → NER model
 - **EasyOCR-based text detection** with configurable confidence thresholds
+- **US fan-geometry scoped OCR** — reads `SequenceOfUltrasoundRegions` (0018,6011) from DICOM metadata to restrict OCR to non-diagnostic zones, eliminating false positives in the clinical fan area
 - **Regex safelist fallback** — preserved for environments without NER model
 - **Low-confidence routing** — images with uncertain OCR are flagged for manual review
 - **Redaction mask output** — redacted regions are exposed as side-channel metadata for downstream review
@@ -112,8 +113,10 @@ flowchart TD
         end
 
         subgraph Logic ["LOGIC ZONE (Purely In-Memory — Zero Disk Access)"]
+            us_regions["1½. RedactByUSRegionsd\n(Reads SequenceOfUltrasoundRegions —\nbuilds PHI-zone mask)\n<i>No-op for non-US modalities</i>"]:::process
+
             subgraph step2 ["2. RedactPixelPHId <i>(Thread-safe via threading.local)</i>"]
-                ocr["EasyOCR Engine\n(Text Detection on MetaTensor)"]:::subProcess
+                ocr["EasyOCR Engine\n(Text Detection on MetaTensor)\n<i>Scoped to PHI zones if US mask present</i>"]:::subProcess
                 
                 subgraph NER ["PHIClassifier (3-Layer Pipeline)"]
                     direction TB
@@ -148,8 +151,10 @@ flowchart TD
     dcm_read --> dcm_cache
     dcm_read --> dcm_pixel
     img_read --> img_pixel
-    
-    dcm_pixel --> ocr
+
+    dcm_cache -. "Cached Dataset\n(in-memory)" .-> us_regions
+    dcm_pixel --> us_regions
+    us_regions -. "us_phi_mask\n(PHI zones only)" .-> ocr
     img_pixel --> ocr
 
     dcm_cache -. "Cached Dataset\n(in-memory)" .-> scrub
@@ -187,12 +192,13 @@ Each file is read from disk **exactly once** during ingestion. The two format pa
 * Both paths use `AegisFileSystem` byte streams for cloud storage compatibility.
 
 ### 2. Logic Zone (Purely In-Memory — Zero Disk Access)
+* **US Region Masking (`RedactByUSRegionsd`)**: For US-modality DICOMs with a `SequenceOfUltrasoundRegions` (0018,6011) tag, reads the scanner-reported pixel boundaries of the diagnostic fan region(s) and builds a boolean PHI-zone mask `(H, W)`. The mask is written to `{key}_us_phi_mask` in the data dict for downstream consumption. Non-US modalities pass through unchanged (no-op). Thread-safe, stateless, zero disk I/O.
 * **Redact (`RedactPixelPHId`)**: A destructive `MapTransform` that uses EasyOCR to detect text on the `MetaTensor` pixels, then classifies each detection through a **3-layer pipeline**:
    * **(1) Clinical allowlist**: preserves known device/parameter terms.
    * **(2) PHI heuristics**: catch obvious date-IDs and institution names.
    * **(3) Stanford NER**: the `stanford-deidentifier-base` model provides semantic classification for remaining text.
    
-   A binary **redaction mask** (matched to the MetaTensor's `spatial_shape`) is generated from PHI detections and stored alongside the output image for downstream review. Images with low OCR confidence bypass this step and are routed to `staging_not_processed/` for manual review. A **safety lock** warns if prior spatial transforms may compromise OCR accuracy. When `ner.enabled: false`, the system falls back to regex safelist matching.
+   When a `{key}_us_phi_mask` is present (written by `RedactByUSRegionsd`), OCR is scoped to only the non-diagnostic zones (annotation/overlay areas where burnt-in PHI lives). Diagnostic fan pixels are zeroed before OCR and restored afterward, eliminating false positives in the clinical image area. A binary **redaction mask** (matched to the MetaTensor's `spatial_shape`) is generated from PHI detections and stored alongside the output image for downstream review. Images with low OCR confidence bypass this step and are routed to `staging_not_processed/` for manual review. A **safety lock** warns if prior spatial transforms may compromise OCR accuracy. When `ner.enabled: false`, the system falls back to regex safelist matching.
 * **Scrub (`ScrubDicomMetadatad`)**: A pure in-memory metadata scrubber for DICOMs. It reads the **cached `pydicom.Dataset`** written by the Ingestion Zone — no second disk read occurs. It injects the redacted pixel data into the Dataset and calls `AegisIdentityManager` to perform deterministic tokenization, dummy replacement, or removal of designated DICOM tags. Skipped entirely for JPEG/PNG files.
 * **Runner orchestration (`monai_aegis.dicom_runner` / `monai_aegis.image_runner`)**: Config and path resolution, DataLoader execution, quarantine routing to `paths.not_processed_dir`, output cleanup, and run summaries live outside the transform graph.
 
@@ -236,6 +242,17 @@ classDiagram
     class LoadImageSeriesd {
         +__call__(data)
         <<MapTransform>>
+    }
+
+    class RedactByUSRegionsd {
+        +__call__(data)
+        -transform: RedactByUSRegions
+        <<MapTransform>>
+    }
+
+    class RedactByUSRegions {
+        +build_us_phi_mask()
+        -enabled
     }
 
     class RedactPixelPHId {
@@ -294,6 +311,8 @@ classDiagram
     LoadDicomSeriesd --|> MapTransform
     LoadImaged --|> MapTransform
     LoadImageSeriesd --|> MapTransform
+    RedactByUSRegionsd *-- RedactByUSRegions
+    RedactByUSRegionsd --|> MapTransform
     RedactPixelPHId *-- RedactPixelPHI
     RedactPixelPHI *-- PHIClassifier
     RedactPixelPHId --|> MapTransform
@@ -321,7 +340,8 @@ The transform graph is designed to keep heavy OCR and metadata work in-memory wh
 | `LoadDicomSeriesd` | `MapTransform` | Stateless volume loading | — | ✅ Safe |
 | `LoadImaged` | `MapTransform` | Stateless image loading | — | ✅ Safe |
 | `LoadImageSeriesd` | `MapTransform` | Stateless image series loading | — | ✅ Safe |
-| `RedactPixelPHId` | `MapTransform` | `threading.local()` for EasyOCR + NER; keyframe OCR for volumes; emits redaction mask/stats side outputs | — | ✅ Safe |
+| `RedactByUSRegionsd` | `MapTransform` | Reads (0018,6011) from cached Dataset; builds PHI-zone mask; no-op for non-US | — | ✅ Safe |
+| `RedactPixelPHId` | `MapTransform` | `threading.local()` for EasyOCR + NER; US mask-scoped OCR; keyframe OCR for volumes; emits redaction mask/stats side outputs | — | ✅ Safe |
 | `PHIClassifier` | — | `threading.local()` for NER pipeline | — | ✅ Safe |
 | `ScrubDicomMetadatad` | `MapTransform` | Pure in-memory; geometry-preserving series scrub | — | ✅ Safe |
 | `SaveDicomd` | `MapTransform`, `ThreadUnsafe` | File I/O | — | ⚠️ Main thread sequential write |
@@ -404,6 +424,10 @@ series:
   accepted_modalities: ['CT', 'MR', 'US', 'CR', 'DX', 'MG', 'PT', 'XA', 'RF', 'OT']
   keyframe_count: 3
   output_structure: 'hierarchical'
+
+us_regions:
+  enabled: true                   # Enable US fan-geometry scoped OCR
+  zero_outside_regions: true      # Zero diagnostic pixels before OCR
 
 ocr:
   languages: ['en']
@@ -525,7 +549,8 @@ aegis/
 │       ├── io.py                      # LoadDicomRaw/d, SaveDicom/d, LoadImage/d, SaveImage/d
 │       ├── series_io.py               # LoadDicomSeries/d, SaveDicomSeries/d
 │       ├── discovery.py               # discover_dicoms, group/validate/sort
-│       ├── pixel.py                   # RedactPixelPHI/d (OCR + NER + volume keyframe)
+│       ├── pixel.py                   # RedactPixelPHI/d (OCR + NER + volume keyframe + US mask scoping)
+│       ├── us_regions.py              # RedactByUSRegions/d (SequenceOfUltrasoundRegions fan-geometry masking)
 │       ├── ner_classifier.py          # PHIClassifier (Stanford NER wrapper)
 │       ├── metadata.py                # ScrubDicomMetadata/d (single + series scrub)
 │       ├── exceptions.py              # Custom exception hierarchy
@@ -540,6 +565,7 @@ aegis/
 │   │   ├── test_series_io.py          # Series load/save transforms
 │   │   ├── test_image_series_io.py    # Image series load/save + tokenization
 │   │   ├── test_volume_redaction.py   # Volume keyframe OCR
+│   │   ├── test_us_regions.py         # US region mask building + pipeline integration
 │   │   └── ...                        # Additional test files
 │   └── integration/                   # End-to-end tests
 ├── run_dicom_pipeline.py              # Compatibility wrapper for monai_aegis.dicom_runner

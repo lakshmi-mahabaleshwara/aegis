@@ -19,6 +19,7 @@ from monai_aegis.transforms.image_series_io import LoadImageSeriesd, SaveImageSe
 from monai_aegis.config.config_loader import load_config
 from monai_aegis.config.storage import AegisFileSystem
 from monai_aegis.transforms.pixel import RedactPixelPHId
+from monai_aegis.transforms.us_regions import RedactByUSRegionsd
 from monai_aegis.transforms.metadata import ScrubDicomMetadatad
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,9 @@ def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str =
         # ==========================================
         # LOGIC ZONE: Pure In-Memory Transforms
         # ==========================================
+        # US Region Masking (scoped OCR for ultrasound fan geometry)
+        RedactByUSRegionsd(keys=keys, config=config),
+
         # Visual Redaction (EasyOCR + safelist/NER)
         RedactPixelPHId(keys=keys, config=config),
 
@@ -124,6 +128,9 @@ def build_series_pipeline(
     return Compose([
         # Ingestion: Load series as volume (C, D, H, W)
         LoadDicomSeriesd(keys=keys, config=config, input_dir=input_dir, fs=fs),
+
+        # US Region Masking (scoped OCR for ultrasound fan geometry)
+        RedactByUSRegionsd(keys=keys, config=config),
 
         # Logic: Keyframe OCR + pixel redaction
         RedactPixelPHId(keys=keys, config=config),
