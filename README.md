@@ -54,6 +54,28 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 
 ---
 
+## ⚖️ Standards Compliance
+
+Aegis implements the **DICOM PS3.15 Basic Application Level Confidentiality
+Profile** (Annex E) for DICOM metadata de-identification, with the following
+options enabled:
+
+- **Basic Application Level Confidentiality Profile** (mandatory baseline)
+- **Clean Pixel Data Option** — OCR + NER-based burnt-in PHI removal
+- **Retain Longitudinal Temporal Information with Modified Dates Option**
+  (dates zeroed, not removed, to preserve relative temporal relationships)
+
+All DICOM UIDs (StudyInstanceUID, SeriesInstanceUID, SOPInstanceUID) are
+replaced with deterministically generated tokens via `AegisIdentityManager`,
+satisfying the PS3.15 UID replacement requirement (action U) while
+enabling re-linkage when the original salt is available.
+
+HIPAA Safe Harbor de-identification is satisfied as a consequence of
+PS3.15 Basic Profile compliance, since the 18 HIPAA identifiers are a
+subset of the tags addressed by the Basic Profile.
+
+---
+
 ## 🔧 Architecture
 
 ### Architecture Diagram
