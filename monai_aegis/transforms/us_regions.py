@@ -24,6 +24,37 @@ logger = logging.getLogger(__name__)
 _US_REGIONS_TAG = (0x0018, 0x6011)
 
 
+def _geometry_key(
+    region_item: pydicom.Dataset,
+) -> Optional[Tuple[int, int, int, int, int]]:
+    """Return a hashable geometry key for a single US region item.
+
+    Used to deduplicate identical entries in SequenceOfUltrasoundRegions.
+    The key ``(x0, y0, x1, y1, spatial_format)`` captures the spatial shape
+    and pixel bounds that uniquely identify a distinct diagnostic region.
+
+    ``BurnedInAnnotation`` is deliberately excluded: two regions at the same
+    pixel coordinates are the same geometric region regardless of annotation
+    metadata, and should only be painted onto the mask once.
+
+    Args:
+        region_item: A single item from SequenceOfUltrasoundRegions.
+
+    Returns:
+        5-tuple ``(x0, y0, x1, y1, spatial_format)``, or ``None`` if any
+        location attribute is missing.
+    """
+    try:
+        x0 = int(region_item.RegionLocationMinX0)
+        y0 = int(region_item.RegionLocationMinY0)
+        x1 = int(region_item.RegionLocationMaxX1)
+        y1 = int(region_item.RegionLocationMaxY1)
+        spatial_format = int(getattr(region_item, "RegionSpatialFormat", 0))
+        return (x0, y0, x1, y1, spatial_format)
+    except AttributeError:
+        return None
+
+
 def _extract_region_bounds(region_item: pydicom.Dataset) -> Optional[Tuple[int, int, int, int]]:
     """Extract pixel bounds from a single US region sequence item.
 
@@ -81,8 +112,16 @@ def build_us_phi_mask(
     # Start with all-True mask (everything is PHI zone)
     mask = np.ones((image_height, image_width), dtype=bool)
 
+    seen: set = set()   # deduplicate by geometry key
+    duplicate_count = 0
     region_count = 0
     for item in regions_seq:
+        geo_key = _geometry_key(item)
+        if geo_key in seen:
+            duplicate_count += 1
+            continue
+        seen.add(geo_key)   # None is hashable; missing-attr items each count once
+
         bounds = _extract_region_bounds(item)
         if bounds is None:
             continue
@@ -111,8 +150,10 @@ def build_us_phi_mask(
         return None
 
     logger.info(
-        "Built US PHI mask from %d region(s): diagnostic area = %d%% of frame",
+        "Built US PHI mask from %d region(s) (%d duplicate(s) skipped): "
+        "diagnostic area = %d%% of frame",
         region_count,
+        duplicate_count,
         int(100 * (1 - mask.sum() / mask.size)),
     )
     return mask
