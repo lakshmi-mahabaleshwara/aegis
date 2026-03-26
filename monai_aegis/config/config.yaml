@@ -22,8 +22,14 @@ tokenization:
 series:
   enabled: true
   accepted_modalities: ['CT', 'MR', 'US', 'CR', 'DX', 'MG', 'PT', 'XA', 'RF', 'OT']
-  keyframe_count: 3
   output_structure: 'hierarchical'  # 'hierarchical' = StudyUID/SeriesUID/
+
+  # Adaptive keyframe sampling for volume PHI redaction (replaces keyframe_count)
+  keyframe_sampling:
+    sample_pct: 0.10    # scan 10% of frames
+    floor: 3            # minimum keyframes regardless of series length
+    ceiling: 25         # maximum keyframes regardless of series length
+    # Examples: T=5→5, T=30→3, T=100→10, T=300→25(capped)
 
 us_regions:
   enabled: true                # Enable US fan-geometry scoped OCR

@@ -40,12 +40,35 @@ from typing import Any, Dict, Optional
 
 import yaml
 
-__all__ = ["load_config", "resolve_env_vars", "deep_merge"]
+__all__ = ["load_config", "resolve_env_vars", "deep_merge", "get_keyframe_sampling"]
 
 logger = logging.getLogger(__name__)
 
 # Matches ${VAR} or ${VAR:default_value}
 _ENV_PATTERN = re.compile(r'\$\{([^}:]+)(?::([^}]*))?\}')
+
+
+def get_keyframe_sampling(config: dict) -> dict:
+    """Read keyframe_sampling block from config with safe defaults.
+
+    Falls back gracefully if the legacy ``keyframe_count`` key is present,
+    using it as the ``floor`` value so existing deployments are unaffected.
+
+    Args:
+        config: Fully resolved config dict (output of :func:`load_config`).
+
+    Returns:
+        Dict with keys ``sample_pct``, ``floor``, and ``ceiling``.
+    """
+    series_cfg = config.get("series", {})
+    # Backwards compatibility: if old key exists, derive floor from it
+    legacy_count = series_cfg.get("keyframe_count")
+    sampling = series_cfg.get("keyframe_sampling", {})
+    return {
+        "sample_pct": sampling.get("sample_pct", 0.10),
+        "floor":      sampling.get("floor", legacy_count or 3),
+        "ceiling":    sampling.get("ceiling", 25),
+    }
 
 
 def resolve_env_vars(obj: Any) -> Any:

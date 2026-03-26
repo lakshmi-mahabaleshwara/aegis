@@ -25,7 +25,11 @@ from monai.utils.enums import TransformBackends
 
 from monai_aegis.transforms.exceptions import PixelRedactionError
 
-__all__ = ["detect_text", "apply_redaction", "RedactPixelPHI", "RedactPixelPHId"]
+__all__ = [
+    "detect_text", "apply_redaction",
+    "select_keyframe_indices", "build_union_mask", "redact_volume_safe",
+    "RedactPixelPHI", "RedactPixelPHId",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +167,157 @@ def apply_redaction(
 
 
 # ---------------------------------------------------------------------------
+# Adaptive keyframe selection and union-mask helpers
+# ---------------------------------------------------------------------------
+
+def select_keyframe_indices(
+    num_frames: int,
+    *,
+    sample_pct: float = 0.10,
+    floor: int = 3,
+    ceiling: int = 25,
+) -> List[int]:
+    """Adaptive keyframe selection — scales with series length.
+
+    Priority rules:
+
+    1. ``num_frames <= floor`` → scan every frame (100% coverage).
+    2. ``raw = round(num_frames * sample_pct)``.
+    3. ``k = clamp(raw, floor, ceiling)``.
+    4. Distribute *k* indices evenly across ``[0, num_frames-1]``.
+    5. Always include frame 0 and frame ``num_frames-1``.
+
+    Examples::
+
+        select_keyframe_indices(5)    # [0,1,2,3,4]  — 100%, below floor
+        select_keyframe_indices(30)   # [0,14,29]     — 3 frames (floor)
+        select_keyframe_indices(100)  # [0,11,...,99] — 10 frames
+        select_keyframe_indices(300)  # 25 frames     — ceiling hit
+
+    Args:
+        num_frames: Total number of frames in the volume.
+        sample_pct: Fraction of frames to sample (default 10%).
+        floor: Minimum number of keyframes regardless of series length.
+        ceiling: Maximum number of keyframes regardless of series length.
+
+    Returns:
+        Sorted list of unique frame indices.
+    """
+    if num_frames <= 0:
+        return []
+    if num_frames <= floor:
+        return list(range(num_frames))
+
+    raw = round(num_frames * sample_pct)
+    k = max(floor, min(ceiling, raw))
+
+    # Evenly distribute k points across [0, num_frames-1]
+    indices = sorted({
+        round(i * (num_frames - 1) / (k - 1))
+        for i in range(k)
+    })
+
+    # Boundary guarantee — first and last always included
+    if 0 not in indices:
+        indices = [0] + indices
+    if (num_frames - 1) not in indices:
+        indices = indices + [num_frames - 1]
+
+    return sorted(set(indices))
+
+
+def build_union_mask(
+    volume: np.ndarray,
+    keyframe_indices: List[int],
+    ocr_fn: Any,
+    *,
+    existing_mask: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Run OCR on selected keyframes; return pixel-level union of all masks.
+
+    A pixel is flagged if PHI was detected there on **any** keyframe.
+    Conservative by design — may slightly over-redact, never under-redacts.
+
+    Args:
+        volume: Pixel volume with shape ``(T, C, H, W)``.
+        keyframe_indices: Frame indices from :func:`select_keyframe_indices`.
+        ocr_fn: Callable ``(C, H, W) → bool (H, W)`` — detects PHI and
+            returns a spatial mask.
+        existing_mask: Optional ``bool (H, W)`` mask (e.g. from
+            ``RedactByUSRegionsd``) merged into the union via bitwise OR.
+
+    Returns:
+        Tuple of ``(union_mask, stats)``:
+
+        - ``union_mask``: ``bool (H, W)`` to apply to all frames.
+        - ``stats``: Audit dict with keys ``keyframes_scanned``,
+          ``keyframe_indices``, ``per_keyframe_phi_pixels``,
+          ``union_phi_pixels``, ``total_frames``, ``pct_frames_scanned``.
+    """
+    H, W = volume.shape[2], volume.shape[3]
+    union: np.ndarray = np.zeros((H, W), dtype=bool)
+    per_kf: Dict[int, int] = {}
+
+    for idx in keyframe_indices:
+        frame_mask = ocr_fn(volume[idx])   # (C, H, W) → bool (H, W)
+        per_kf[idx] = int(frame_mask.sum())
+        union |= frame_mask
+
+    if existing_mask is not None:
+        union |= existing_mask
+
+    T = volume.shape[0]
+    stats: Dict[str, Any] = {
+        "keyframes_scanned":       len(keyframe_indices),
+        "keyframe_indices":        keyframe_indices,
+        "per_keyframe_phi_pixels": per_kf,
+        "union_phi_pixels":        int(union.sum()),
+        "total_frames":            T,
+        "pct_frames_scanned":      round(100 * len(keyframe_indices) / max(T, 1), 1),
+    }
+    return union, stats
+
+
+def redact_volume_safe(
+    volume: np.ndarray,
+    ocr_fn: Any,
+    *,
+    sample_pct: float = 0.10,
+    floor: int = 3,
+    ceiling: int = 25,
+    existing_mask: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Adaptive keyframe sampling + union mask application.
+
+    Single entry point — replaces the old count-based propagation.
+    A pixel flagged on **any** keyframe is zeroed on **all** frames.
+
+    Args:
+        volume: Pixel volume ``(T, C, H, W)`` — modified **in-place**.
+        ocr_fn: Callable ``(C, H, W) → bool (H, W)``.
+        sample_pct: Fraction of frames to sample (default 10%).
+        floor: Minimum keyframes (default 3).
+        ceiling: Maximum keyframes (default 25).
+        existing_mask: Optional ``bool (H, W)`` mask merged into union.
+
+    Returns:
+        Tuple of ``(volume, union_mask, stats)``.
+    """
+    indices = select_keyframe_indices(
+        volume.shape[0],
+        sample_pct=sample_pct,
+        floor=floor,
+        ceiling=ceiling,
+    )
+    union_mask, stats = build_union_mask(
+        volume, indices, ocr_fn, existing_mask=existing_mask
+    )
+    # Single vectorised write — no Python loop over frames
+    volume[:, :, union_mask] = 0
+    return volume, union_mask, stats
+
+
+# ---------------------------------------------------------------------------
 # Array Transform
 # ---------------------------------------------------------------------------
 
@@ -253,6 +408,19 @@ class RedactPixelPHI(Transform):
             return self._redact_volume(image)
         return self._redact_single(image)
 
+    def _ocr_single_frame(self, frame: np.ndarray) -> np.ndarray:
+        """Run OCR on a single ``(C, H, W)`` frame; return ``bool (H, W)`` PHI mask.
+
+        Used by :func:`build_union_mask` as the ``ocr_fn`` callback.
+        Side-effect: updates ``self.last_stats`` and appends to
+        ``self._vol_stats_acc`` (if set by the calling ``_redact_volume``).
+        """
+        redacted = self._redact_single(frame)
+        mask = np.any(frame != redacted, axis=0)
+        if getattr(self, '_vol_stats_acc', None) is not None:
+            self._vol_stats_acc.append(self.last_stats.copy())
+        return mask
+
     def _redact_single(self, image: np.ndarray) -> np.ndarray:
         """Redact PHI from a single 2D image ``(C, H, W)``."""
         orig_dtype = image.dtype
@@ -292,82 +460,72 @@ class RedactPixelPHI(Transform):
         return redacted.astype(orig_dtype)
 
     def _redact_volume(self, volume: np.ndarray) -> np.ndarray:
-        """Redact PHI from a 3D volume ``(C, D, H, W)`` using keyframe OCR.
+        """Redact PHI from a 3D volume ``(C, D, H, W)`` using adaptive keyframe sampling.
 
-        Strategy:
-          1. Sample keyframes (first, middle, last slice).
-          2. Run OCR on each keyframe.
-          3. If bounding boxes match → apply unified mask to all slices.
-          4. If bounding boxes differ → fall back to slice-by-slice OCR.
+        Samples an adaptive percentage of frames (10%, floor=3, ceiling=25),
+        builds a pixel-level union mask across all sampled keyframes, then
+        zeros every flagged pixel on every frame.  A pixel detected as PHI
+        on **any** keyframe is redacted on **all** frames — no count-based
+        heuristics, no silent misses when PHI shifts position across slices.
 
         Args:
             volume: Volume array ``(C, D, H, W)``.
 
         Returns:
-            Redacted volume in the same shape and dtype.
+            Redacted copy of the volume in the same shape and dtype.
         """
         orig_dtype = volume.dtype
         C, D, H, W = volume.shape
-        keyframe_count = self.config.get('series', {}).get('keyframe_count', 3)
 
-        # Select keyframe indices
-        if D <= keyframe_count:
-            keyframe_indices = list(range(D))
-        else:
-            keyframe_indices = [0, D // 2, D - 1]
+        series_cfg = self.config.get('series', {})
+        sampling = series_cfg.get('keyframe_sampling', {})
+        # Legacy fallback: honour old keyframe_count as floor
+        legacy_floor = series_cfg.get('keyframe_count', 3)
+        sample_pct = sampling.get('sample_pct', 0.10)
+        floor      = sampling.get('floor', legacy_floor)
+        ceiling    = sampling.get('ceiling', 25)
 
-        # Run OCR on keyframes, collect bounding boxes per keyframe
-        keyframe_bboxes = []
-        all_stats = []
-        for idx in keyframe_indices:
-            # Extract 2D slice as (C, H, W)
-            slice_2d = volume[:, idx, :, :]
-            self._redact_single(slice_2d)
-            keyframe_bboxes.append(self.last_stats.get('redacted_count', 0))
-            all_stats.append(self.last_stats.copy())
+        # Accumulate per-keyframe OCR stats via _ocr_single_frame side-channel
+        self._vol_stats_acc: List[Dict[str, Any]] = []
 
-        # Decide strategy: uniform mask vs slice-by-slice
-        redacted_counts = keyframe_bboxes
-        boxes_match = len(set(redacted_counts)) <= 1
-
+        # redact_volume_safe uses (T, C, H, W) convention.
+        # Transpose (C, D, H, W) → (D, C, H, W) as a view so in-place
+        # modifications inside redact_volume_safe propagate back to result.
         result = volume.copy()
+        vol_DCHW = np.transpose(result, (1, 0, 2, 3))  # view of result
 
-        if boxes_match and redacted_counts[0] > 0:
-            # Uniform mask: redact keyframe[0] and apply same bboxes to all
-            redacted_ref = self._redact_single(volume[:, keyframe_indices[0], :, :])
-            mask = np.any(volume[:, keyframe_indices[0], :, :] != redacted_ref, axis=0)
-            for d in range(D):
-                result[:, d, :, :][..., mask] = 0
-            strategy = 'uniform_mask'
-            logger.info(
-                "Volume keyframe OCR: uniform mask applied to %d slices", D
-            )
-        elif any(c > 0 for c in redacted_counts):
-            # Slice-by-slice fallback
-            for d in range(D):
-                result[:, d, :, :] = self._redact_single(volume[:, d, :, :])
-            strategy = 'slice_by_slice'
-            logger.info(
-                "Volume keyframe OCR: slice-by-slice fallback for %d slices", D
-            )
-        else:
-            # No text detected on any keyframe — skip redaction
-            strategy = 'no_text'
-            logger.info(
-                "Volume keyframe OCR: no text detected on %d keyframes", len(keyframe_indices)
-            )
+        _, union_mask, kf_stats = redact_volume_safe(
+            vol_DCHW,
+            self._ocr_single_frame,
+            sample_pct=sample_pct,
+            floor=floor,
+            ceiling=ceiling,
+        )
 
-        # Aggregate stats
+        # Aggregate OCR stats collected across all keyframe calls
+        acc = self._vol_stats_acc
+        self._vol_stats_acc = None   # reset
+
+        phi_pixels = int(union_mask.sum())
         self.last_stats = {
-            'total_detections': sum(s.get('total_detections', 0) for s in all_stats),
-            'low_confidence_count': sum(s.get('low_confidence_count', 0) for s in all_stats),
-            'safelisted_count': sum(s.get('safelisted_count', 0) for s in all_stats),
-            'ner_classified_count': sum(s.get('ner_classified_count', 0) for s in all_stats),
-            'redacted_count': sum(s.get('redacted_count', 0) for s in all_stats),
-            'volume_strategy': strategy,
-            'num_slices': D,
-            'keyframe_indices': keyframe_indices,
+            'total_detections':    sum(s.get('total_detections', 0) for s in acc),
+            'low_confidence_count': sum(s.get('low_confidence_count', 0) for s in acc),
+            'safelisted_count':    sum(s.get('safelisted_count', 0) for s in acc),
+            'ner_classified_count': sum(s.get('ner_classified_count', 0) for s in acc),
+            'redacted_count':      phi_pixels,
+            'volume_strategy':     'adaptive_union',
+            'num_slices':          D,
+            'keyframe_indices':    kf_stats.get('keyframe_indices', []),
+            'keyframe_stats':      kf_stats,
         }
+
+        logger.info(
+            "Volume OCR: %d keyframes scanned (%.1f%% of %d), union mask %d px",
+            kf_stats.get('keyframes_scanned', 0),
+            kf_stats.get('pct_frames_scanned', 0.0),
+            D,
+            phi_pixels,
+        )
 
         return result.astype(orig_dtype)
 
@@ -488,10 +646,6 @@ class RedactPixelPHId(MapTransform):
                 d[f"{key}_redaction_stats"] = stats
 
                 # Generate binary redaction mask matched to spatial_shape
-                spatial_shape = pixel_array.shape[1:]  # (H, W) from (C, H, W)
-                redaction_mask = np.zeros(spatial_shape, dtype=np.uint8)
-                bboxes = getattr(self.transform, 'last_stats', {}).get('_bboxes', [])
-
                 # Recompute mask from the difference between original and redacted
                 compare_src = original_pixels if us_phi_mask is not None else pixel_array
                 if compare_src.ndim == 3:
