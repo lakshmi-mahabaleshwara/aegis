@@ -52,7 +52,8 @@ class LoadDicomRaw(Transform):
     rotate burned-in text away from OCR detection.
 
     .. note::
-        This transform handles **DICOM files only** (``.dcm``).
+        This transform handles **DICOM files** of any extension
+        (including extensionless hospital exports).
         For JPEG/PNG images, use :py:class:`LoadImage` instead.
 
     Returns:
@@ -86,18 +87,24 @@ class LoadDicomRaw(Transform):
         """
         uri = str(uri)
 
-        if uri.lower().endswith('.dcm'):
+        # Content-driven: try DICOM load first (handles extensionless files)
+        ds = None
+        if dataset is not None:
+            ds = dataset
+        else:
             try:
-                if dataset is not None:
-                    ds = dataset
-                else:
-                    _fs = fs if fs is not None else AegisFileSystem()
-                    with _fs.open_read(uri) as f:
-                        ds = pydicom.dcmread(f)
+                _fs = fs if fs is not None else AegisFileSystem()
+                with _fs.open_read(uri) as f:
+                    ds = pydicom.dcmread(f)
+            except Exception:
+                ds = None
+
+        if ds is not None:
+            try:
                 pixel_array = ds.pixel_array.astype(np.float32)
             except Exception as e:
                 raise DicomLoadError(
-                    f"Failed to read DICOM: {e}",
+                    f"Failed to read DICOM pixel data: {e}",
                     uri=uri,
                     transform="LoadDicomRaw",
                 ) from e
@@ -174,13 +181,17 @@ class LoadDicomRawd(MapTransform):
             try:
                 ds = None
                 
-                # Read dataset once to keep it in memory
-                if uri.lower().endswith('.dcm'):
+                # Content-driven: try DICOM load first (handles extensionless files)
+                try:
                     if self.fs is not None:
                         with self.fs.open_read(uri) as f:
                             ds = pydicom.dcmread(f)
                     else:
                         ds = pydicom.dcmread(uri)
+                except Exception:
+                    ds = None  # Not a DICOM — fall through to image loading
+
+                if ds is not None:
                     d[f"{key}_dicom_dataset"] = ds
                     
                 from monai_aegis.transforms.utility import resolve_target_token

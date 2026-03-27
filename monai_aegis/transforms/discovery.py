@@ -28,6 +28,7 @@ from monai_aegis.transforms.exceptions import SeriesLoadError
 __all__ = [
     "DicomSliceInfo", "discover_dicoms", "group_into_series",
     "validate_series", "sort_slices", "discover_images",
+    "is_dicom_file",
 ]
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,51 @@ ACCEPTED_MODALITIES = frozenset([
 
 # Series grouping key: (StudyInstanceUID, SeriesInstanceUID)
 SeriesKey = Tuple[str, str]
+
+# Extensions that are never DICOM — skip immediately during discovery
+_SKIP_EXTENSIONS = frozenset([
+    '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif',
+    '.txt', '.xml', '.json', '.csv', '.html', '.htm',
+    '.pdf', '.zip', '.gz', '.tar', '.log', '.md',
+    '.py', '.yaml', '.yml', '.toml', '.cfg', '.ini',
+    '.ds_store',
+])
+
+
+def is_dicom_file(
+    path: str,
+    fs: Optional['AegisFileSystem'] = None,
+) -> bool:
+    """Fast content-driven check: is this file a valid DICOM?
+
+    Reads the first 132 bytes and checks for the ``DICM`` magic marker
+    at byte offset 128 (the standard DICOM preamble).  Falls back to
+    attempting ``pydicom.dcmread`` for legacy files that omit the
+    preamble (some older generators skip the 128-byte preamble).
+
+    Never loads pixel data.
+
+    Args:
+        path: File path (local or cloud-native via *fs*).
+        fs: Optional :py:class:`AegisFileSystem` for cloud I/O.
+
+    Returns:
+        ``True`` if the file is a valid DICOM, ``False`` otherwise.
+    """
+    try:
+        _fs = fs if fs is not None else AegisFileSystem()
+        with _fs.open_read(path) as f:
+            header = f.read(132)
+            if len(header) >= 132 and header[128:132] == b'DICM':
+                return True
+
+        # Fallback: some legacy DICOMs lack the preamble but are still valid.
+        # Attempt a lightweight parse.
+        with _fs.open_read(path) as f:
+            pydicom.dcmread(f, stop_before_pixels=True, force=True)
+        return True
+    except Exception:
+        return False
 
 
 @dataclass
@@ -128,10 +174,20 @@ def discover_dicoms(
     walker = fs.walk(folder) if fs is not None else os.walk(folder)
     for root, _dirs, files in walker:
         for fname in files:
-            if not fname.lower().endswith('.dcm'):
+            ext = os.path.splitext(fname)[1].lower()
+
+            # Tier 1: Skip known non-DICOM extensions immediately
+            if ext in _SKIP_EXTENSIONS:
                 continue
+
             _fs = fs if fs is not None else AegisFileSystem()
             fpath = _fs.join(root, fname)
+
+            # Tier 2: .dcm → fast-track to pydicom.dcmread (skip preamble sniff)
+            # Tier 3: extensionless or unknown → preamble sniff first
+            if ext != '.dcm' and not is_dicom_file(fpath, fs=_fs):
+                continue
+
             try:
                 with _fs.open_read(fpath) as f:
                     ds = pydicom.dcmread(f, stop_before_pixels=True)

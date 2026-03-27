@@ -83,6 +83,44 @@ class TestDiscoverDicoms(unittest.TestCase):
             slices = discover_dicoms(tmpdir)
             self.assertEqual(len(slices), 1)
 
+    def test_discovers_extensionless_dicoms(self):
+        """Extensionless DICOM files (common in hospital exports) must be discovered."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _make_dcm(os.path.join(tmpdir, 'IM00001'))  # no extension
+            _make_dcm(os.path.join(tmpdir, 'slice2.dcm'))
+            slices = discover_dicoms(tmpdir)
+            self.assertEqual(len(slices), 2)
+
+    def test_skips_image_extensions(self):
+        """Known image extensions (.jpg, .png) should be skipped by DICOM discovery."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _make_dcm(os.path.join(tmpdir, 'valid.dcm'))
+            # Create fake .jpg and .png files
+            with open(os.path.join(tmpdir, 'photo.jpg'), 'wb') as f:
+                f.write(b'NOT A DICOM')
+            with open(os.path.join(tmpdir, 'image.png'), 'wb') as f:
+                f.write(b'NOT A DICOM')
+            slices = discover_dicoms(tmpdir)
+            self.assertEqual(len(slices), 1)
+
+    def test_dcm_extension_fast_tracked(self):
+        """.dcm files skip the preamble sniff and go straight to pydicom."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _make_dcm(os.path.join(tmpdir, 'fast.dcm'))
+            slices = discover_dicoms(tmpdir)
+            self.assertEqual(len(slices), 1)
+            self.assertIn('fast.dcm', slices[0].uri)
+
+    def test_skips_non_dicom_extensionless(self):
+        """Non-DICOM extensionless files (text, binary) should be skipped."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, 'README'), 'w') as f:
+                f.write('This is a readme file, not a DICOM')
+            with open(os.path.join(tmpdir, 'data'), 'wb') as f:
+                f.write(b'\x00' * 200)
+            slices = discover_dicoms(tmpdir)
+            self.assertEqual(len(slices), 0)
+
 
 class TestGroupIntoSeries(unittest.TestCase):
 

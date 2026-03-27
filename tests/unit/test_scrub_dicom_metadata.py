@@ -106,7 +106,8 @@ class TestScrubDicomMetadatad(unittest.TestCase):
         # RGB input (3, H, W)
         data = {
             'image': np.ones((3, 10, 10), dtype=np.float32),
-            'image_meta_dict': {'filename_or_obj': '/path/to/file.dcm'}
+            'image_meta_dict': {'filename_or_obj': '/path/to/file.dcm'},
+            'image_dicom_dataset': mock_ds
         }
 
         # Mock the array transform
@@ -136,7 +137,8 @@ class TestScrubDicomMetadatad(unittest.TestCase):
         with patch('monai_aegis.transforms.metadata.pydicom.dcmread', return_value=mock_ds):
             data = {
                 'image': np.ones((1, 10, 10), dtype=np.float32) * 100,
-                'image_meta_dict': {'filename_or_obj': '/path/to/file.dcm'}
+                'image_meta_dict': {'filename_or_obj': '/path/to/file.dcm'},
+                'image_dicom_dataset': mock_ds
             }
             result = self.scrubber(data)
 

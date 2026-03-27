@@ -234,8 +234,10 @@ class ScrubDicomMetadatad(MapTransform):
                 if not fpath:
                     continue
 
-                # Only handle DICOM files
-                if not str(fpath).lower().endswith('.dcm'):
+                # Only handle files that were loaded as DICOM (content-driven)
+                has_dataset = (f"{key}_dicom_dataset" in d or
+                               f"{key}_dicom_datasets" in d)
+                if not has_dataset:
                     continue
 
                 # ---- Series mode: list of datasets ----
