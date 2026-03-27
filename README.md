@@ -2,7 +2,7 @@
 
 **Medical Image De-identification Pipeline with OCR, NER, and Series-Aware Volume Processing**
 
-Aegis is a production-ready pipeline for de-identifying medical images (DICOM series, individual DICOMs, JPEG, PNG) by removing Protected Health Information (PHI) while preserving critical clinical markers, image quality, and geometric metadata.
+Aegis is a production-ready pipeline for de-identifying medical images (DICOM series, individual DICOMs, JPEG, PNG) by removing Protected Health Information (PHI) while preserving critical clinical markers, image quality, and geometric metadata. DICOM discovery is content-driven (preamble sniffing), so extensionless hospital exports are detected automatically.
 
 ### Use Cases
 
@@ -25,6 +25,17 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **Low-confidence routing** — images with uncertain OCR are flagged for manual review
 - **Redaction mask output** — redacted regions are exposed as side-channel metadata for downstream review
 - **Fully configurable** — PHI labels, clinical allowlist, clinical patterns, and PHI heuristics all defined in `config.yaml`
+
+### Content-Driven Discovery
+- **DICOM preamble sniffing** — detects DICOM files by reading the 132-byte header (`DICM` magic), not by file extension
+- **Extensionless support** — hospital exports without `.dcm` extension are discovered automatically
+- **Three-tier detection** — skip known image extensions → fast-track `.dcm` → preamble-sniff extensionless/unknown files
+- **Exported utility** — `is_dicom_file(path)` available for external consumers
+
+### Adaptive Volume Redaction
+- **Pixel-level union masking** — PHI detected on *any* sampled keyframe is redacted on *all* frames in the volume
+- **Adaptive keyframe sampling** — 10% of frames (floor=3, ceiling=25), always includes first and last
+- **Conservative by design** — eliminates silent misses where PHI shifts position across slices
 
 ### Separate Pipeline Architecture
 - **DICOM pipeline** (`monai_aegis.dicom_runner`) — DICOM single-file or series-aware volume mode
@@ -92,7 +103,7 @@ flowchart TD
     classDef cache fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,stroke-dasharray: 5 5,color:#000;
 
     subgraph Inputs ["Inputs"]
-        dicom["DICOM Files (.dcm)"]:::input
+        dicom["DICOM Files (.dcm, extensionless)"]:::input
         img["Image Files (.jpg, .png)"]:::input
     end
 
@@ -184,7 +195,7 @@ An architectural priority is **strict I/O separation**. All file I/O flows throu
 
 Each file is read from disk **exactly once** during ingestion. The two format paths differ in what they cache:
 
-* **DICOM Load (`LoadDicomRawd` / `LoadDicomSeriesd`)**: Calls `pydicom.dcmread` to parse the `.dcm` file into a `pydicom.Dataset`, then:
+* **DICOM Load (`LoadDicomRawd` / `LoadDicomSeriesd`)**: Uses content-driven detection (tries `pydicom.dcmread` first, falls back to image loading) to parse DICOM files of any extension (including extensionless exports) into a `pydicom.Dataset`, then:
    * **Caches** the full `pydicom.Dataset` object in the data dict (`{key}_dicom_dataset`) — this is what `ScrubDicomMetadatad` consumes later without any disk access.
    * **Extracts** `pixel_array` from the Dataset and wraps it into a channel-first MONAI `MetaTensor` (`C, H, W`).
    * Enriches `MetaTensor.meta` with acquisition metadata (modality, patient ID, study date).
@@ -422,7 +433,10 @@ tokenization:
 series:
   enabled: true
   accepted_modalities: ['CT', 'MR', 'US', 'CR', 'DX', 'MG', 'PT', 'XA', 'RF', 'OT']
-  keyframe_count: 3
+  keyframe_sampling:
+    sample_pct: 0.10    # Sample 10% of frames as keyframes
+    floor: 3             # Minimum keyframes (below this, scan all)
+    ceiling: 25          # Maximum keyframes for very large volumes
   output_structure: 'hierarchical'
 
 us_regions:
@@ -548,7 +562,7 @@ aegis/
 │       ├── __init__.py                # Public API exports
 │       ├── io.py                      # LoadDicomRaw/d, SaveDicom/d, LoadImage/d, SaveImage/d
 │       ├── series_io.py               # LoadDicomSeries/d, SaveDicomSeries/d
-│       ├── discovery.py               # discover_dicoms, group/validate/sort
+│       ├── discovery.py               # discover_dicoms, is_dicom_file, group/validate/sort
 │       ├── pixel.py                   # RedactPixelPHI/d (OCR + NER + volume keyframe + US mask scoping)
 │       ├── us_regions.py              # RedactByUSRegions/d (SequenceOfUltrasoundRegions fan-geometry masking)
 │       ├── ner_classifier.py          # PHIClassifier (Stanford NER wrapper)
