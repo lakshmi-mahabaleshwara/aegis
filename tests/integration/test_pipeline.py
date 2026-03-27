@@ -5,7 +5,7 @@ import numpy as np
 import pydicom
 from PIL import Image
 
-from monai_aegis.transforms.pipeline import build_pipeline
+from monai_aegis.transforms.pipeline import build_pipeline, build_image_pipeline
 
 class TestAegisPipeline(unittest.TestCase):
 
@@ -53,8 +53,9 @@ class TestAegisPipeline(unittest.TestCase):
         img = Image.new('RGB', (10, 10), color='white')
         img.save(self.jpg_path)
 
-        # Build Pipeline
+        # Build Pipelines
         self.pipeline = build_pipeline()
+        self.image_pipeline = build_image_pipeline()
 
     def tearDown(self):
         if os.path.exists(self.test_dir):
@@ -95,9 +96,10 @@ class TestAegisPipeline(unittest.TestCase):
         patient_name = str(ds_output.PatientName)
         self.assertTrue(patient_name.startswith('TOKEN_'), f"PatientName should be tokenized, got: {patient_name}")
 
-        # 2. Run on JPEG
+        # 2. Run on JPEG via the image pipeline
+        self.image_pipeline = build_image_pipeline(output_dir=self.output_dir)
         data = {'image': self.jpg_path}
-        result = self.pipeline(data)
+        result = self.image_pipeline(data)
         self.assertIn('image', result)
         self.assertTrue(hasattr(result['image'], 'shape'))
 
@@ -114,7 +116,7 @@ class TestAegisPipeline(unittest.TestCase):
         with open(min_config_path, 'w') as f:
             f.write("ocr:\n  languages: ['en']\npii_mapping: {}\n")
             
-        pipeline = build_pipeline(config_path=os.path.abspath(min_config_path))
+        pipeline = build_image_pipeline(config_path=os.path.abspath(min_config_path))
         
         # Run on JPEG
         data = {'image': self.jpg_path}

@@ -24,6 +24,7 @@ env/
 staging_input/*
 !staging_input/.gitkeep
 staging_output/*
+output/*
 !staging_output/.gitkeep
 staging_not_processed/*
 !staging_not_processed/.gitkeep

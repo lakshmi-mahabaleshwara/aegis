@@ -11,6 +11,7 @@ Composes the de-identification transforms into MONAI Compose pipelines.
 import os
 import torch
 import logging
+from typing import Any, Tuple
 from monai.transforms import Compose
 
 from monai_aegis.transforms.io import LoadDicomRawd, SaveDicomd, LoadImaged, SaveImaged
@@ -23,6 +24,21 @@ from monai_aegis.transforms.us_regions import RedactByUSRegionsd
 from monai_aegis.transforms.metadata import ScrubDicomMetadatad
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_builder_context(config_path: str) -> Tuple[str, dict[str, Any], AegisFileSystem]:
+    """Resolve config path, load config, log device, and build filesystem once."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    if not os.path.isabs(config_path):
+        config_path = os.path.join(base_dir, config_path)
+
+    config = load_config(config_path)
+
+    is_gpu = torch.cuda.is_available() or torch.backends.mps.is_available()
+    logger.info("Device set to: %s", "GPU" if is_gpu else "CPU")
+
+    fs = AegisFileSystem.from_config(config)
+    return config_path, config, fs
 
 
 def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str = './output', input_dir: str = '') -> Compose:
@@ -42,20 +58,7 @@ def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str =
     Returns:
         A MONAI Compose pipeline ready for ``pipeline({"image": uri})``.
     """
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    if not os.path.isabs(config_path):
-        config_path = os.path.join(base_dir, config_path)
-
-    # Load config ONCE (with env-var resolution)
-    config = load_config(config_path)
-
-    # Device Detection
-    is_gpu = torch.cuda.is_available() or torch.backends.mps.is_available()
-    logger.info(f"Device set to: {'GPU' if is_gpu else 'CPU'}")
-
-    # Storage backend (default: local filesystem)
-    fs = AegisFileSystem.from_config(config)
-
+    _, config, fs = _resolve_builder_context(config_path)
     keys = ['image']
 
     return Compose([
@@ -111,18 +114,7 @@ def build_series_pipeline(
         A MONAI Compose pipeline ready for
         ``pipeline({"image": [path1, path2, ...]})``.
     """
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    if not os.path.isabs(config_path):
-        config_path = os.path.join(base_dir, config_path)
-
-    config = load_config(config_path)
-
-    is_gpu = torch.cuda.is_available() or torch.backends.mps.is_available()
-    logger.info(f"Device set to: {'GPU' if is_gpu else 'CPU'}")
-
-    # Storage backend
-    fs = AegisFileSystem.from_config(config)
-
+    _, config, fs = _resolve_builder_context(config_path)
     keys = ['image']
 
     return Compose([
@@ -168,14 +160,7 @@ def build_image_pipeline(
     Returns:
         A MONAI Compose pipeline ready for ``pipeline({"image": uri})``.
     """
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    if not os.path.isabs(config_path):
-        config_path = os.path.join(base_dir, config_path)
-
-    config = load_config(config_path)
-
-    fs = AegisFileSystem.from_config(config)
-
+    _, config, fs = _resolve_builder_context(config_path)
     keys = ['image']
 
     return Compose([
@@ -210,14 +195,7 @@ def build_image_series_pipeline(
     Returns:
         A composed MONAI transform pipeline.
     """
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    if not os.path.isabs(config_path):
-        config_path = os.path.join(base_dir, config_path)
-
-    config = load_config(config_path)
-
-    fs = AegisFileSystem.from_config(config)
-
+    _, config, fs = _resolve_builder_context(config_path)
     keys = ['image']
 
     return Compose([
