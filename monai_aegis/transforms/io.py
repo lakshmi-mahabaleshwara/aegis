@@ -259,16 +259,13 @@ class SaveDicom(Transform):
             is_cloud=self.fs is not None and self.fs.protocol != 'file'
         )
 
-        if self.fs is not None:
-            self.fs.makedirs(self.fs.dirname(out_path))
-        else:
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-
         try:
             if self.fs is not None:
+                self.fs.makedirs(self.fs.dirname(out_path))
                 with self.fs.open_write(out_path) as f:
                     dataset.save_as(f)
             else:
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
                 dataset.save_as(out_path)
         except Exception as e:
             raise DicomSaveError(

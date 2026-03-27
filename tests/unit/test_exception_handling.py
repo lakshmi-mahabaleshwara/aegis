@@ -81,6 +81,7 @@ class TestDicomSaveError(unittest.TestCase):
         from unittest.mock import MagicMock
         saver = SaveDicom.__new__(SaveDicom)
         saver.output_dir = '/nonexistent/readonly/dir'
+        saver.input_dir = '/input'
         saver.fs = None
 
         mock_ds = MagicMock()

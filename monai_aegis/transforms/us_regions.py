@@ -253,11 +253,13 @@ class RedactByUSRegionsd(MapTransform):
         for key in self.key_iterator(d):
             # Read cached Dataset (written by LoadDicomRawd / LoadDicomSeriesd)
             dataset = d.get(f"{key}_dicom_dataset")
+            datasets_list: Optional[list] = None
             if dataset is None:
                 # Series mode: check the list of datasets
-                datasets_list = d.get(f"{key}_dicom_datasets")
-                if datasets_list and isinstance(datasets_list, list):
-                    dataset = datasets_list[0]
+                raw = d.get(f"{key}_dicom_datasets")
+                if raw and isinstance(raw, list):
+                    datasets_list = raw
+                    dataset = datasets_list[0]  # used only to verify presence
 
             if dataset is None:
                 continue
@@ -280,7 +282,18 @@ class RedactByUSRegionsd(MapTransform):
             else:
                 continue
 
-            mask = self.transform(dataset, image_height, image_width)
+            # Build mask — union across all datasets in series mode
+            if datasets_list is not None:
+                combined: Optional[np.ndarray] = None
+                for ds in datasets_list:
+                    m = self.transform(ds, image_height, image_width)
+                    if m is None:
+                        continue
+                    combined = m if combined is None else (combined & m)
+                mask = combined
+            else:
+                mask = self.transform(dataset, image_height, image_width)
+
             if mask is not None:
                 d[f"{key}_us_phi_mask"] = mask
                 logger.info(

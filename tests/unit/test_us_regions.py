@@ -336,5 +336,60 @@ class TestPixelRedactionWithUSMask(unittest.TestCase):
         )
 
 
+class TestSeriesModeUnion(unittest.TestCase):
+    """Tests for RedactByUSRegionsd series-mode union across all datasets."""
+
+    def _make_transform(self):
+        config = {'us_regions': {'enabled': True}}
+        return RedactByUSRegionsd(keys=['image'], config=config)
+
+    def _make_data(self, datasets_list, h=64, w=64):
+        tensor = np.zeros((1, len(datasets_list), h, w), dtype=np.float32)
+        return {
+            'image': tensor,
+            'image_dicom_datasets': datasets_list,
+        }
+
+    def test_series_mode_unions_masks_across_all_datasets(self):
+        """Mask must cover regions from all datasets, not just datasets[0]."""
+        # Three datasets with non-overlapping diagnostic regions
+        ds0 = _make_us_dataset(regions=[(0, 0, 10, 10)])    # top-left
+        ds1 = _make_us_dataset(regions=[(20, 20, 30, 30)])  # middle
+        ds2 = _make_us_dataset(regions=[(50, 50, 60, 60)])  # bottom-right
+
+        result = self._make_transform()(self._make_data([ds0, ds1, ds2]))
+        mask = result['image_us_phi_mask']
+
+        # Each dataset's diagnostic region must be False (not-PHI) in the union
+        self.assertFalse(mask[5, 5],   "ds0 region should be non-PHI")
+        self.assertFalse(mask[25, 25], "ds1 region should be non-PHI")
+        self.assertFalse(mask[55, 55], "ds2 region should be non-PHI")
+        # Pixel outside all regions is PHI
+        self.assertTrue(mask[63, 63])
+
+    def test_series_mode_first_dataset_missing_tag_still_gets_mask(self):
+        """If datasets[0] has no US-regions tag, later datasets must not be skipped."""
+        ds_no_tag = _make_us_dataset(regions=None)   # valid US but no tag
+        ds_with_tag = _make_us_dataset(regions=[(10, 10, 50, 50)])
+
+        result = self._make_transform()(self._make_data([ds_no_tag, ds_with_tag]))
+        self.assertIn('image_us_phi_mask', result,
+                      "Mask should be written even when first dataset has no tag")
+        mask = result['image_us_phi_mask']
+        self.assertFalse(mask[30, 30], "Region from ds1 should be non-PHI")
+
+    def test_single_image_mode_unchanged(self):
+        """Single-dataset path must still write the correct mask."""
+        ds = _make_us_dataset(regions=[(5, 5, 30, 30)])
+        tensor = np.zeros((1, 64, 64), dtype=np.float32)
+        data = {'image': tensor, 'image_dicom_dataset': ds}
+
+        result = self._make_transform()(data)
+        self.assertIn('image_us_phi_mask', result)
+        mask = result['image_us_phi_mask']
+        self.assertFalse(mask[10, 10], "Diagnostic pixel should be non-PHI")
+        self.assertTrue(mask[63, 63],  "Outside pixel should be PHI")
+
+
 if __name__ == '__main__':
     unittest.main()
