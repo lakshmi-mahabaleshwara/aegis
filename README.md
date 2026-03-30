@@ -93,100 +93,126 @@ subset of the tags addressed by the Basic Profile.
 ### Architecture Diagram
 
 ```mermaid
-flowchart TD
-    classDef input fill:#e1fcff,stroke:#01579b,stroke-width:2px,color:#000;
-    classDef process fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000;
-    classDef subProcess fill:#f3e5f5,stroke:#7b1fa2,stroke-width:1px,stroke-dasharray: 5 5,color:#000;
-    classDef output fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000;
-    classDef config fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000;
-    classDef decision fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#000;
-    classDef cache fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,stroke-dasharray: 5 5,color:#000;
+flowchart LR
+    classDef input fill:#dbeafe,stroke:#1e40af,stroke-width:2px,color:#1e3a5f,font-weight:bold;
+    classDef load fill:#d1fae5,stroke:#047857,stroke-width:2px,color:#064e3b;
+    classDef logic fill:#ede9fe,stroke:#6d28d9,stroke-width:2px,color:#4c1d95;
+    classDef ai fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f;
+    classDef save fill:#fce7f3,stroke:#be185d,stroke-width:2px,color:#831843;
+    classDef output fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#1e293b;
+    classDef reject fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d;
 
-    subgraph Inputs ["Inputs"]
-        dicom["DICOM Files (.dcm, extensionless)"]:::input
-        img["Image Files (.jpg, .png)"]:::input
+    IN_DCM["📁 DICOM\n.dcm / extensionless"]:::input
+    IN_IMG["🖼️ Images\n.jpg / .png"]:::input
+
+    subgraph READ ["① FILE READ — One Read per File"]
+        direction TB
+        DCM_LOAD["LoadDicomRawd\npydicom.dcmread → Dataset\npixel_array → MetaTensor"]:::load
+        IMG_LOAD["LoadImaged\nPIL.open → MetaTensor"]:::load
     end
 
-    config["config.yaml\n(OCR, NER, PII Mapping)"]:::config
+    subgraph LOGIC ["② IN-MEMORY LOGIC — Zero Disk Access"]
+        direction TB
+        US["RedactByUSRegionsd\nBuild PHI-zone mask\nfrom tag 0018,6011"]:::logic
+        subgraph OCR_NER ["RedactPixelPHId"]
+            direction TB
+            OCR["EasyOCR\ntext detection"]:::ai
+            NER["PHIClassifier\n1. Allowlist\n2. Heuristics\n3. Stanford NER"]:::ai
+            MASK["Apply redaction\nmask"]:::logic
+        end
+        SCRUB["ScrubDicomMetadatad\nPII actions + tokenization\non cached Dataset"]:::logic
+    end
 
-    subgraph Pipeline ["Aegis Transform Pipeline"]
-        
-        subgraph Ingestion ["I/O BOUNDARY: FILE READ (One Read per File)"]
-            subgraph dicom_load ["DICOM Load Path"]
-                dcm_read["1a. pydicom.dcmread\n(Parse .dcm → pydicom.Dataset)"]:::process
-                dcm_cache["Cache pydicom.Dataset\nin data dict"]:::cache
-                dcm_pixel["Extract pixel_array\n→ MetaTensor (C,H,W)"]:::process
-            end
-            subgraph image_load ["Image Load Path"]
-                img_read["1b. PIL / Image.open\n(Read .jpg/.png → pixel array)"]:::process
-                img_pixel["→ MetaTensor (C,H,W)"]:::process
-            end
+    subgraph WRITE ["③ FILE WRITE — ThreadUnsafe"]
+        SAVE["SaveDicomd\nSaveDicomSeriesd\nSaveImaged"]:::save
+    end
+
+    OUT_OK["✅ staging_output/\nDe-identified"]:::output
+    OUT_NO["⚠️ staging_not_processed/\nManual review"]:::reject
+
+    IN_DCM --> DCM_LOAD
+    IN_IMG --> IMG_LOAD
+    DCM_LOAD -- "MetaTensor\n+ cached Dataset" --> US
+    IMG_LOAD -- "MetaTensor" --> OCR
+    US -- "us_phi_mask" --> OCR
+    OCR -- "low confidence" --> OUT_NO
+    OCR -- "detections" --> NER
+    NER --> MASK
+    MASK --> SCRUB
+    DCM_LOAD -. "cached Dataset" .-> SCRUB
+    SCRUB --> SAVE
+    SAVE --> OUT_OK
+```
+
+### Component Interaction & Thread Safety
+
+```mermaid
+block-beta
+    columns 4
+
+    block:RUNNER:4
+        columns 4
+        R_TITLE["🎛️ Runner Layer — Orchestration"]
+        R1["dicom_runner"]
+        R2["image_runner"]
+        R3["cli"]
+    end
+
+    space:4
+
+    block:SAFE:4
+        columns 4
+        S_TITLE["✅ Thread-Safe Transforms — workers > 0 OK"]:4
+
+        block:LOAD:2
+            columns 1
+            L_TITLE["Loaders"]
+            L1["LoadDicomRawd\nContent-driven detection"]
+            L2["LoadDicomSeriesd"]
+            L3["LoadImaged\nLoadImageSeriesd"]
         end
 
-        subgraph Logic ["LOGIC ZONE (Purely In-Memory — Zero Disk Access)"]
-            us_regions["1½. RedactByUSRegionsd\n(Reads SequenceOfUltrasoundRegions —\nbuilds PHI-zone mask)\n<i>No-op for non-US modalities</i>"]:::process
-
-            subgraph step2 ["2. RedactPixelPHId <i>(Thread-safe via threading.local)</i>"]
-                ocr["EasyOCR Engine\n(Text Detection on MetaTensor)\n<i>Scoped to PHI zones if US mask present</i>"]:::subProcess
-                
-                subgraph NER ["PHIClassifier (3-Layer Pipeline)"]
-                    direction TB
-                    L1{"1. Clinical\nAllowlist / Patterns?"}:::decision
-                    L2{"2. Heuristic\nPHI Patterns?"}:::decision
-                    L3["3. Stanford NER\nModel"]:::subProcess
-                end
-                
-                action_redact["Apply Black-Box\nRedaction Mask"]:::process
-            end
-
-            scrub["3. ScrubDicomMetadatad\n(Reads cached pydicom.Dataset —\nno disk access)\n<i>Thread-safe</i>"]:::process
-            id_manager["AegisIdentityManager\n(Deterministic Tokenization / Hashing)"]:::subProcess
-        end
-        
-        subgraph Persistence ["I/O BOUNDARY: FILE WRITE (One Write per File)"]
-            save["4. Save Transforms\n(SaveDicomd / SaveDicomSeriesd / SaveImaged / SaveImageSeriesd)\n<i>ThreadUnsafe — main thread only</i>"]:::process
+        block:PROCESS:2
+            columns 1
+            P_TITLE["Processing"]
+            P1["RedactByUSRegionsd\nUS mask via AND union"]
+            P2["RedactPixelPHId\nthread_local OCR + NER"]
+            P3["ScrubDicomMetadatad\nrecursive PII scrub"]
         end
     end
 
-    subgraph Outputs ["Outputs"]
-        out_not_proc["staging_not_processed/\n(Low-confidence / Manual Review)"]:::output
-        out_proc["staging_output/\n(De-identified Files)"]:::output
+    space:4
+
+    block:UNSAFE:2
+        columns 1
+        U_TITLE["⚠️ ThreadUnsafe — main thread only"]
+        U1["SaveDicomd / SaveDicomSeriesd"]
+        U2["SaveImaged / SaveImageSeriesd"]
     end
 
-    %% Connections
-    config -. "Configures" .-> Pipeline
-    
-    dicom -- "staging_input/" --> dcm_read
-    img -- "staging_input/" --> img_read
+    block:UTIL:2
+        columns 1
+        UT_TITLE["🔧 Utilities"]
+        UT1["AegisIdentityManager\nDeterministic tokenization"]
+        UT2["PHIClassifier\nthread_local NER pipeline"]
+        UT3["AegisFileSystem\nfsspec cloud I/O"]
+    end
 
-    dcm_read --> dcm_cache
-    dcm_read --> dcm_pixel
-    img_read --> img_pixel
+    RUNNER --> SAFE
+    SAFE --> UNSAFE
 
-    dcm_cache -. "Cached Dataset\n(in-memory)" .-> us_regions
-    dcm_pixel --> us_regions
-    us_regions -. "us_phi_mask\n(PHI zones only)" .-> ocr
-    img_pixel --> ocr
-
-    dcm_cache -. "Cached Dataset\n(in-memory)" .-> scrub
-    
-    ocr -- "Confidence < Threshold" --> out_not_proc
-    ocr -- "Confidence ≥ Threshold" --> L1
-    
-    L1 -- "Yes (Preserve)" --> scrub
-    L1 -- "No" --> L2
-    
-    L2 -- "Yes" --> action_redact
-    L2 -- "No" --> L3
-    
-    L3 -- "Classified as PHI" --> action_redact
-    L3 -- "Classified as Clinical" --> scrub
-    
-    action_redact --> scrub
-    
-    scrub <--> |"Tokenize/Hash Patient PII"| id_manager
-    scrub --> save
-    save --> out_proc
+    style R_TITLE fill:#f8fafc,stroke:none,color:#475569,font-weight:bold
+    style S_TITLE fill:#f0fdf4,stroke:none,color:#166534,font-weight:bold
+    style L_TITLE fill:#ecfdf5,stroke:none,color:#047857,font-weight:bold
+    style P_TITLE fill:#ecfdf5,stroke:none,color:#047857,font-weight:bold
+    style U_TITLE fill:#fef2f2,stroke:none,color:#991b1b,font-weight:bold
+    style UT_TITLE fill:#eff6ff,stroke:none,color:#1e40af,font-weight:bold
+    style RUNNER fill:#f8fafc,stroke:#94a3b8,stroke-width:2px
+    style SAFE fill:#f0fdf4,stroke:#22c55e,stroke-width:2px
+    style LOAD fill:#ecfdf5,stroke:#86efac,stroke-width:1px
+    style PROCESS fill:#ecfdf5,stroke:#86efac,stroke-width:1px
+    style UNSAFE fill:#fef2f2,stroke:#ef4444,stroke-width:2px
+    style UTIL fill:#eff6ff,stroke:#93c5fd,stroke-width:2px
 ```
 
 An architectural priority is **strict I/O separation**. All file I/O flows through `AegisFileSystem` (fsspec) for cloud-native reads/writes, while transform logic stays purely in-memory. The pipeline is split into three explicit zones:
@@ -217,127 +243,6 @@ Each file is read from disk **exactly once** during ingestion. The two format pa
 * **DICOM Save (`SaveDicomd` / `SaveDicomSeriesd`)**: Writes de-identified DICOM datasets. `ThreadUnsafe` — MONAI routes all writes to the main thread.
 * **Image Save (`SaveImaged` / `SaveImageSeriesd`)**: Converts channel-first tensors back to HWC, normalizes to uint8, and writes PNG/JPEG. `ThreadUnsafe`.
 
-### Component Interaction & Thread Safety Model
-
-```mermaid
-classDiagram
-    class RunPipeline {
-        +run_pipeline(config_path)
-        -check_confidence(stats)
-        -route_file()
-    }
-
-    class PipelineBuilder {
-        +build_pipeline(config, output_dir)
-    }
-
-    class Transforms {
-        <<Module>>
-    }
-
-    class LoadDicomRawd {
-        +__call__(data)
-        <<MapTransform>>
-    }
-
-    class LoadDicomSeriesd {
-        +__call__(data)
-        <<MapTransform>>
-    }
-
-    class LoadImaged {
-        +__call__(data)
-        <<MapTransform>>
-    }
-
-    class LoadImageSeriesd {
-        +__call__(data)
-        <<MapTransform>>
-    }
-
-    class RedactByUSRegionsd {
-        +__call__(data)
-        -transform: RedactByUSRegions
-        <<MapTransform>>
-    }
-
-    class RedactByUSRegions {
-        +build_us_phi_mask()
-        -enabled
-    }
-
-    class RedactPixelPHId {
-        +__call__(data)
-        -transform: RedactPixelPHI
-        <<MapTransform>>
-    }
-
-    class RedactPixelPHI {
-        +reader (thread_local)
-        +ner_classifier (thread_local)
-        +detect_text()
-        +apply_redaction()
-    }
-
-    class PHIClassifier {
-        +classify_texts(texts)
-        -pipeline (thread_local)
-        -phi_labels
-        -clinical_allowlist
-        -clinical_patterns
-        -phi_heuristic_patterns
-    }
-
-    class ScrubDicomMetadatad {
-        +__call__(data)
-        -transform: ScrubDicomMetadata
-        <<MapTransform>>
-    }
-
-    class SaveDicomd {
-        +__call__(data)
-        <<MapTransform, ThreadUnsafe>>
-    }
-
-    class SaveDicomSeriesd {
-        +__call__(data)
-        <<MapTransform, ThreadUnsafe>>
-    }
-
-    class SaveImaged {
-        +__call__(data)
-        <<MapTransform, ThreadUnsafe>>
-    }
-
-    class SaveImageSeriesd {
-        +__call__(data)
-        <<MapTransform, ThreadUnsafe>>
-    }
-
-    RunPipeline --> PipelineBuilder
-    PipelineBuilder ..> Transforms
-    RunPipeline --> RedactPixelPHI : reads stats
-
-    LoadDicomRawd --|> MapTransform
-    LoadDicomSeriesd --|> MapTransform
-    LoadImaged --|> MapTransform
-    LoadImageSeriesd --|> MapTransform
-    RedactByUSRegionsd *-- RedactByUSRegions
-    RedactByUSRegionsd --|> MapTransform
-    RedactPixelPHId *-- RedactPixelPHI
-    RedactPixelPHI *-- PHIClassifier
-    RedactPixelPHId --|> MapTransform
-    ScrubDicomMetadatad *-- ScrubDicomMetadata
-    ScrubDicomMetadatad --|> MapTransform
-    SaveDicomd --|> MapTransform
-    SaveDicomd --|> ThreadUnsafe
-    SaveDicomSeriesd --|> MapTransform
-    SaveDicomSeriesd --|> ThreadUnsafe
-    SaveImaged --|> MapTransform
-    SaveImaged --|> ThreadUnsafe
-    SaveImageSeriesd --|> MapTransform
-    SaveImageSeriesd --|> ThreadUnsafe
-```
 
 The transform graph is designed to keep heavy OCR and metadata work in-memory while isolating filesystem writes. The runner controls `DataLoader` concurrency via `runtime.dataloader_num_workers`.
 
