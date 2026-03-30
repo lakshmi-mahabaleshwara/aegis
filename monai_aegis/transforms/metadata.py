@@ -60,6 +60,55 @@ class ScrubDicomMetadata(Transform):
         super().__init__()
         self.config = config
         self.identity_manager = AegisIdentityManager.from_config(config)
+        self._pii_actions = self._build_pii_actions(config.get('pii_mapping', {}))
+
+    @staticmethod
+    def _build_pii_actions(pii_mapping: Dict[str, Any]) -> Dict[pydicom.tag.BaseTag, str]:
+        """Parse configured tag actions once so recursive scrubbing can reuse them."""
+        actions: Dict[pydicom.tag.BaseTag, str] = {}
+        for tag_str, action in pii_mapping.items():
+            try:
+                clean_tag_str = tag_str.strip('() ').replace(' ', '')
+                parts = clean_tag_str.split(',')
+                tag = pydicom.tag.Tag(int(parts[0], 16), int(parts[1], 16))
+            except Exception as e:
+                logger.error("Error parsing tag %s: %s", tag_str, e)
+                continue
+            actions[tag] = str(action).upper()
+        return actions
+
+    def _apply_action(self, ds: pydicom.Dataset, tag: pydicom.tag.BaseTag, action: str) -> None:
+        """Apply one configured action to a single element on a dataset."""
+        if tag not in ds:
+            return
+        if action == 'REMOVE':
+            del ds[tag]
+        elif action == 'ZERO':
+            vr = ds[tag].VR
+            ds[tag].value = b'' if vr in ['OB', 'OW', 'UN'] else ''
+        elif action == 'DUMMY':
+            token = self.identity_manager.get_token(str(ds[tag].value))
+            ds[tag].value = token
+
+    def _scrub_dataset_recursive(self, ds: pydicom.Dataset) -> None:
+        """Apply configured actions to this dataset and every nested sequence item."""
+        for elem in list(ds):
+            if elem.VR == "SQ":
+                for item in elem.value:
+                    if isinstance(item, pydicom.Dataset):
+                        self._scrub_dataset_recursive(item)
+            action = self._pii_actions.get(elem.tag)
+            if action is not None:
+                self._apply_action(ds, elem.tag, action)
+
+    def _remove_private_tags_recursive(self, ds: pydicom.Dataset) -> None:
+        """Remove private tags from this dataset and nested sequence items."""
+        ds.remove_private_tags()
+        for elem in ds:
+            if elem.VR == "SQ":
+                for item in elem.value:
+                    if isinstance(item, pydicom.Dataset):
+                        self._remove_private_tags_recursive(item)
 
     def __call__(
         self,
@@ -85,30 +134,9 @@ class ScrubDicomMetadata(Transform):
         else:
             ds = pydicom.dcmread(uri)
 
-        pii_mapping = self.config.get('pii_mapping', {})
-
         # 1. Metadata Scrubbing
-        for tag_str, action in pii_mapping.items():
-            try:
-                clean_tag_str = tag_str.strip('() ').replace(' ', '')
-                parts = clean_tag_str.split(',')
-                tag = pydicom.tag.Tag(int(parts[0], 16), int(parts[1], 16))
-            except Exception as e:
-                logger.error(f"Error parsing tag {tag_str}: {e}")
-                continue
-
-            if tag in ds:
-                action = action.upper()
-                if action == 'REMOVE':
-                    del ds[tag]
-                elif action == 'ZERO':
-                    vr = ds[tag].VR
-                    ds[tag].value = b'' if vr in ['OB', 'OW', 'UN'] else ''
-                elif action == 'DUMMY':
-                    token = self.identity_manager.get_token(str(ds[tag].value))
-                    ds[tag].value = token
-
-        ds.remove_private_tags()
+        self._scrub_dataset_recursive(ds)
+        self._remove_private_tags_recursive(ds)
 
         # 2. Pixel Data Injection (in-memory only)
         if pixel_data is not None:

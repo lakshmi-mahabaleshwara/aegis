@@ -5,6 +5,7 @@ import sys
 import os
 import pydicom
 from pydicom.dataset import Dataset, FileMetaDataset
+from pydicom.sequence import Sequence
 
 from monai_aegis.transforms.metadata import ScrubDicomMetadata
 from monai_aegis.transforms.utility import AegisIdentityManager
@@ -115,6 +116,27 @@ class TestScrubDicomMetadata(unittest.TestCase):
             if tag in self.ds and action.upper() == 'REMOVE':
                 del self.ds[tag]
         self.assertNotIn('PatientBirthDate', self.ds)
+
+    def test_recursive_sequence_scrubbing(self):
+        nested = Dataset()
+        nested.PatientName = "Nested^Patient"
+        nested.PatientID = "NESTED123"
+        nested.StudyDate = "20240101"
+        nested.AccessionNumber = "ACC-NESTED"
+        block = nested.private_block(0x0009, "Nested Private Creator", 0x10)
+        block.add_new(0x01, "LO", "Nested Secret")
+        self.ds.add_new((0x0040, 0x0275), 'SQ', Sequence([nested]))
+
+        scrubbed = self.transform(uri="unused.dcm", dataset=self.ds)
+        nested_scrubbed = scrubbed[(0x0040, 0x0275)].value[0]
+
+        self.assertNotIn('PatientName', nested_scrubbed)
+        self.assertTrue(str(nested_scrubbed.PatientID).startswith('TOKEN_'))
+        self.assertEqual(nested_scrubbed.StudyDate, '')
+        self.assertEqual(nested_scrubbed.AccessionNumber, 'ACC-NESTED')
+
+        for elem in nested_scrubbed:
+            self.assertFalse(elem.tag.is_private, "Nested private tags should be removed")
 
 if __name__ == '__main__':
     unittest.main()
