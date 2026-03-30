@@ -203,7 +203,7 @@ Each file is read from disk **exactly once** during ingestion. The two format pa
 * Both paths use `AegisFileSystem` byte streams for cloud storage compatibility.
 
 ### 2. Logic Zone (Purely In-Memory — Zero Disk Access)
-* **US Region Masking (`RedactByUSRegionsd`)**: For US-modality DICOMs with a `SequenceOfUltrasoundRegions` (0018,6011) tag, reads the scanner-reported pixel boundaries of the diagnostic fan region(s) and builds a boolean PHI-zone mask `(H, W)`. The mask is written to `{key}_us_phi_mask` in the data dict for downstream consumption. Non-US modalities pass through unchanged (no-op). Thread-safe, stateless, zero disk I/O.
+* **US Region Masking (`RedactByUSRegionsd`)**: For US-modality DICOMs with a `SequenceOfUltrasoundRegions` (0018,6011) tag, reads the scanner-reported pixel boundaries of the diagnostic fan region(s) and builds a boolean PHI-zone mask `(H, W)`. Regions are **deduplicated by geometry** — identical `(x0, y0, x1, y1, spatial_format)` entries (common in enhanced multi-frame DICOMs with one region record per frame) are collapsed to a single mask-paint. In **series mode**, `build_us_phi_mask` is called on every dataset in the series and the resulting masks are combined with bitwise AND — a pixel is in the PHI zone only if it lies outside the diagnostic fan on every slice, conservatively preserving the full union of diagnostic area. The final mask is written to `{key}_us_phi_mask` in the data dict for downstream consumption. Non-US modalities pass through unchanged (no-op). Thread-safe, stateless, zero disk I/O.
 * **Redact (`RedactPixelPHId`)**: A destructive `MapTransform` that uses EasyOCR to detect text on the `MetaTensor` pixels, then classifies each detection through a **3-layer pipeline**:
    * **(1) Clinical allowlist**: preserves known device/parameter terms.
    * **(2) PHI heuristics**: catch obvious date-IDs and institution names.
@@ -351,7 +351,7 @@ The transform graph is designed to keep heavy OCR and metadata work in-memory wh
 | `LoadDicomSeriesd` | `MapTransform` | Stateless volume loading | — | ✅ Safe |
 | `LoadImaged` | `MapTransform` | Stateless image loading | — | ✅ Safe |
 | `LoadImageSeriesd` | `MapTransform` | Stateless image series loading | — | ✅ Safe |
-| `RedactByUSRegionsd` | `MapTransform` | Reads (0018,6011) from cached Dataset; builds PHI-zone mask; no-op for non-US | — | ✅ Safe |
+| `RedactByUSRegionsd` | `MapTransform` | Reads (0018,6011) from cached Dataset; deduplicates regions by geometry key; series mode unions masks via AND across all slices; no-op for non-US | — | ✅ Safe |
 | `RedactPixelPHId` | `MapTransform` | `threading.local()` for EasyOCR + NER; US mask-scoped OCR; keyframe OCR for volumes; emits redaction mask/stats side outputs | — | ✅ Safe |
 | `PHIClassifier` | — | `threading.local()` for NER pipeline | — | ✅ Safe |
 | `ScrubDicomMetadatad` | `MapTransform` | Pure in-memory; geometry-preserving series scrub | — | ✅ Safe |
