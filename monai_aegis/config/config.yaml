@@ -154,28 +154,28 @@ safelist:
   - '(?i)hospital'
 
 pii_mapping:
-  '(0010, 0010)': 'DUMMY'   # PatientName
-  '(0010, 0020)': 'DUMMY'   # PatientID
-  '(0008, 0020)': 'ZERO'    # StudyDate
-  '(0008, 0050)': 'REMOVE'  # AccessionNumber
-  '(0008, 0090)': 'DUMMY'   # ReferringPhysicianName
-  '(0008, 0080)': 'REMOVE'  # InstitutionName
-  '(0010, 0030)': 'REMOVE'  # PatientBirthDate
-  '(0010, 0040)': 'REMOVE'  # PatientSex
-  '(0010, 1010)': 'REMOVE'  # PatientAge
-  '(0010, 1020)': 'REMOVE'  # PatientSize
-  '(0010, 1030)': 'REMOVE'  # PatientWeight
-  '(0008, 0081)': 'REMOVE'  # InstitutionAddress
-  '(0008, 1040)': 'REMOVE'  # InstitutionalDeptName
-  '(0008, 1048)': 'REMOVE'  # PhysiciansOfRecord
-  '(0008, 1050)': 'REMOVE'  # PerformingPhysicianName
-  '(0008, 1030)': 'REMOVE'  # StudyDescription
-  '(0008, 103E)': 'REMOVE'  # SeriesDescription
-  '(0008, 0021)': 'ZERO'    # SeriesDate
-  '(0008, 0023)': 'ZERO'    # ContentDate
-  '(0008, 0030)': 'ZERO'    # StudyTime 
-  '(0008, 0031)': 'ZERO'    # SeriesTime
-  '(0020, 0010)': 'DUMMY'   # StudyID
-  '(0010, 21B0)': 'REMOVE'  # AdditionalPatientHistory
-  '(0040, A124)': 'REMOVE'  # UID (observation)
-  '(0010, 2297)': 'REMOVE'  # ResponsiblePerson
+  '(0010,0010)': 'DUMMY'   # PatientName
+  '(0010,0020)': 'DUMMY'   # PatientID
+  '(0010,0030)': 'REMOVE'  # PatientBirthDate
+  '(0008,0020)': 'ZERO'    # StudyDate
+  '(0008,0050)': 'REMOVE'  # AccessionNumber
+  '(0008,0090)': 'DUMMY'   # ReferringPhysicianName
+  '(0008,0080)': 'REMOVE'  # InstitutionName
+  '(0010,0040)': 'REMOVE'  # PatientSex
+  '(0010,1010)': 'REMOVE'  # PatientAge
+  '(0010,1020)': 'REMOVE'  # PatientSize
+  '(0010,1030)': 'REMOVE'  # PatientWeight
+  '(0008,0081)': 'REMOVE'  # InstitutionAddress
+  '(0008,1040)': 'REMOVE'  # InstitutionalDeptName
+  '(0008,1048)': 'REMOVE'  # PhysiciansOfRecord
+  '(0008,1050)': 'REMOVE'  # PerformingPhysicianName
+  '(0008,1030)': 'REMOVE'  # StudyDescription
+  '(0008,103E)': 'REMOVE'  # SeriesDescription
+  '(0008,0021)': 'ZERO'    # SeriesDate
+  '(0008,0023)': 'ZERO'    # ContentDate
+  '(0008,0030)': 'ZERO'    # StudyTime
+  '(0008,0031)': 'ZERO'    # SeriesTime
+  '(0020,0010)': 'DUMMY'   # StudyID
+  '(0010,21B0)': 'REMOVE'  # AdditionalPatientHistory
+  '(0040,A124)': 'REMOVE'  # UID in SR content
+  '(0010,2297)': 'REMOVE'  # ResponsiblePerson

@@ -63,14 +63,56 @@ class ScrubDicomMetadata(Transform):
         self._pii_actions = self._build_pii_actions(config.get('pii_mapping', {}))
 
     @staticmethod
+    def _parse_hex_part(s: str) -> int:
+        """Parse one DICOM tag group/element string as a hex integer.
+
+        Accepts both plain hex (``0010``) and explicit ``0x``-prefixed hex
+        (``0x0010``).  Plain digits are always interpreted as base-16 via
+        ``int(s, 16)`` — never as decimal or octal — so leading zeros are
+        harmless and no ``SyntaxError`` can arise from the string value.
+        """
+        s = s.strip()
+        if s.lower().startswith('0x'):
+            return int(s, 0)   # 0x-prefix: let Python auto-detect (always 16)
+        return int(s, 16)      # plain hex digits: explicit base-16
+
+    @staticmethod
+    def _parse_tag_key(tag_str: str) -> tuple:
+        """Parse a DICOM tag string key into a ``(group, element)`` int tuple.
+
+        Accepts any of these formats from ``pii_mapping`` in ``config.yaml``:
+
+        * ``'(0010,0010)'``   — preferred, standard DICOM notation (no space)
+        * ``'(0010, 0010)'``  — with space after comma (legacy, still accepted)
+        * ``'(0x0010,0x0010)'`` — explicit hex prefix (also accepted)
+
+        Args:
+            tag_str: DICOM tag as a string key from ``pii_mapping``.
+
+        Returns:
+            ``(group, element)`` as a tuple of ints.
+
+        Raises:
+            ValueError: If ``tag_str`` does not contain exactly two
+                comma-separated parts.
+        """
+        inner = tag_str.strip().strip('()')
+        parts = inner.split(',')
+        if len(parts) != 2:
+            raise ValueError(f"Invalid DICOM tag format: {tag_str!r}")
+        return (
+            ScrubDicomMetadata._parse_hex_part(parts[0]),
+            ScrubDicomMetadata._parse_hex_part(parts[1]),
+        )
+
+    @staticmethod
     def _build_pii_actions(pii_mapping: Dict[str, Any]) -> Dict[pydicom.tag.BaseTag, str]:
         """Parse configured tag actions once so recursive scrubbing can reuse them."""
         actions: Dict[pydicom.tag.BaseTag, str] = {}
         for tag_str, action in pii_mapping.items():
             try:
-                clean_tag_str = tag_str.strip('() ').replace(' ', '')
-                parts = clean_tag_str.split(',')
-                tag = pydicom.tag.Tag(int(parts[0], 16), int(parts[1], 16))
+                group, element = ScrubDicomMetadata._parse_tag_key(tag_str)
+                tag = pydicom.tag.Tag(group, element)
             except Exception as e:
                 logger.error("Error parsing tag %s: %s", tag_str, e)
                 continue
