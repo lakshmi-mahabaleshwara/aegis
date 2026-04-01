@@ -270,9 +270,20 @@ def run_series(config_path: str) -> None:
         return
 
     folder_groups = defaultdict(list)
+    
+    # Normalize input dir for root-level comparison
+    norm_input_dir = os.path.normpath(paths.pipeline_input_dir) if fs.protocol == "file" else paths.pipeline_input_dir.rstrip("/")
+
     for file_path in image_files:
         parent_dir = fs.dirname(file_path) if fs.protocol != "file" else os.path.dirname(file_path)
-        folder_groups[parent_dir].append(file_path)
+        norm_parent = os.path.normpath(parent_dir) if fs.protocol == "file" else parent_dir.rstrip("/")
+        
+        if norm_parent == norm_input_dir:
+            # Files directly in the root input directory are treated as individual singletons
+            # Group them by their own file path so len(folder_images) == 1
+            folder_groups[file_path].append(file_path)
+        else:
+            folder_groups[parent_dir].append(file_path)
 
     pipeline = build_image_series_pipeline(
         config_path=paths.config_path,
