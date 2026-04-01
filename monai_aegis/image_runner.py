@@ -271,14 +271,19 @@ def run_series(config_path: str) -> None:
 
     folder_groups = defaultdict(list)
     
-    # Normalize input dir for root-level comparison
-    norm_input_dir = os.path.normpath(paths.pipeline_input_dir) if fs.protocol == "file" else paths.pipeline_input_dir.rstrip("/")
+    # Use absolute paths for comparison since fsspec LocalFileSystem yields absolute paths
+    abs_input_dir = os.path.abspath(paths.pipeline_input_dir) if fs.protocol == "file" else paths.pipeline_input_dir.rstrip("/")
 
     for file_path in image_files:
         parent_dir = fs.dirname(file_path) if fs.protocol != "file" else os.path.dirname(file_path)
-        norm_parent = os.path.normpath(parent_dir) if fs.protocol == "file" else parent_dir.rstrip("/")
         
-        if norm_parent == norm_input_dir:
+        if fs.protocol == "file":
+            abs_parent = os.path.abspath(parent_dir)
+            is_root_file = (abs_parent == abs_input_dir)
+        else:
+            is_root_file = (parent_dir.rstrip("/") == abs_input_dir)
+        
+        if is_root_file:
             # Files directly in the root input directory are treated as individual singletons
             # Group them by their own file path so len(folder_images) == 1
             folder_groups[file_path].append(file_path)
