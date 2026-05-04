@@ -1,0 +1,83 @@
+# Public benchmark dataset registry.
+#
+# Single source of truth consumed by:
+#   - scripts/prepare_pydicom_samples.py
+#       (auto-extracts the `pydicom_samples` entry from pydicom's installed
+#       test data — runs offline, no downloads.)
+#   - tests/benchmark/public_dataset/benchmark_large_datasets.ipynb
+#       (interactive download + benchmark for the larger entries below.)
+#
+# To add a new dataset, append an entry under `datasets:` and re-run the
+# preparer or the notebook. Paths are resolved relative to the repo root
+# unless absolute.
+
+datasets:
+
+  # ------------------------------------------------------------------
+  # Built-in smoke tier — committed to the repo, runs without network.
+  # ------------------------------------------------------------------
+  pydicom_samples:
+    description: pydicom built-in test data — small, repo-committed smoke tier.
+    source:
+      type: pydicom_builtin
+    filters:
+      accepted_modalities: [CT, MR, US, CR, DX, MG, PT, XA, RF, OT]
+      require_pixel_data: true
+      file_suffix: .dcm
+    target_dir: tests/benchmark/public_dataset/pydicom_samples
+    license: MIT (pydicom test data)
+    approx_size: ~5 MB
+    modalities: [CT, MR, US, CR, OT]
+
+  # ------------------------------------------------------------------
+  # Large public datasets — interactive download via the notebook.
+  # ------------------------------------------------------------------
+  tcia_hnscc:
+    description: TCIA Head-Neck Cetuximab (HNSCC) — multi-series CT/PET studies with rich DICOM tags.
+    source:
+      type: tcia
+      collection: HNSCC
+      url: https://wiki.cancerimagingarchive.net/display/Public/HNSCC
+    target_dir: tests/benchmark/public_dataset/tcia_hnscc
+    license: TCIA Restricted (see source)
+    approx_size: ~4 GB
+    modalities: [CT, PT]
+
+  rsna_pneumonia:
+    description: RSNA Pneumonia Detection Challenge — single-frame CR/DX with metadata variety.
+    source:
+      type: kaggle
+      dataset: rsna-pneumonia-detection-challenge
+      url: https://www.kaggle.com/c/rsna-pneumonia-detection-challenge
+    target_dir: tests/benchmark/public_dataset/rsna_pneumonia
+    license: Kaggle competition (see source)
+    approx_size: ~3 GB
+    modalities: [CR, DX]
+
+  busi_ultrasound:
+    description: Breast Ultrasound Images (BUSI) — US PNGs with burnt-in text annotations.
+    source:
+      type: kaggle
+      dataset: aryashah2k/breast-ultrasound-images-dataset
+      url: https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset
+    target_dir: tests/benchmark/public_dataset/busi_ultrasound
+    license: CC BY 4.0
+    approx_size: ~780 MB
+    modalities: [US]
+
+  nih_chestxray14:
+    description: NIH Chest X-ray 14 — large-scale DX collection with diverse metadata.
+    source:
+      type: http
+      url: https://nihcc.app.box.com/v/ChestXray-NIHCC
+    target_dir: tests/benchmark/public_dataset/nih_chestxray14
+    license: NIH (see source)
+    approx_size: ~42 GB
+    modalities: [DX]
+
+# Defaults applied when running bench_aegis.py from the notebook unless
+# a per-dataset override is supplied.
+benchmark_defaults:
+  config: monai_aegis/config/config.yaml
+  output: tests/benchmark/results/
+  mode: single

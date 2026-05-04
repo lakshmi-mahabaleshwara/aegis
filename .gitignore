@@ -45,6 +45,17 @@ Thumbs.db
 .EasyOCR/
 
 # ========================
+# Benchmark
+# (commit pydicom_samples/ as a smoke fixture; ignore everything else)
+# ========================
+tests/benchmark/results/
+tests/benchmark/public_dataset/tcia_*
+tests/benchmark/public_dataset/rsna_*
+tests/benchmark/public_dataset/busi_*
+tests/benchmark/public_dataset/nih_*
+tests/benchmark/public_dataset/ground_truth/
+
+# ========================
 # Miscellaneous
 # ========================
 *.log
