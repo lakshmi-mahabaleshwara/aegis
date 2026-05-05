@@ -5,16 +5,23 @@
 #       (auto-extracts the `pydicom_samples` entry from pydicom's installed
 #       test data — runs offline, no downloads.)
 #   - tests/benchmark/public_dataset/benchmark_large_datasets.ipynb
-#       (interactive download + benchmark for the larger entries below.)
+#       (per-platform staging guidance + benchmark for the larger entries.)
 #
-# To add a new dataset, append an entry under `datasets:` and re-run the
-# preparer or the notebook. Paths are resolved relative to the repo root
-# unless absolute.
+# Adding a new dataset:
+#   1. Append an entry under `datasets:`.
+#   2. For anything other than the pydicom built-in tier, set
+#      `source.type: manual` — the notebook expects the user to download
+#      and stage the files themselves, then surfaces `download_instructions`
+#      and `expected_layout` if the staging directory is empty.
+#   3. Paths in `target_dir` are repo-relative. The notebook also accepts
+#      a runtime `DATA_ROOT` override (Drive on Colab, /kaggle/input on
+#      Kaggle), in which case it looks under `<DATA_ROOT>/<dataset_key>/`.
 
 datasets:
 
   # ------------------------------------------------------------------
   # Built-in smoke tier — committed to the repo, runs without network.
+  # The only entry the notebook auto-prepares.
   # ------------------------------------------------------------------
   pydicom_samples:
     description: pydicom built-in test data — small, repo-committed smoke tier.
@@ -30,50 +37,165 @@ datasets:
     modalities: [CT, MR, US, CR, OT]
 
   # ------------------------------------------------------------------
-  # Large public datasets — interactive download via the notebook.
+  # Larger public datasets — user downloads and stages manually.
+  # `source.provider` is informational; the notebook treats every
+  # non-pydicom_builtin entry the same way (check, then instruct).
   # ------------------------------------------------------------------
   tcia_hnscc:
     description: TCIA Head-Neck Cetuximab (HNSCC) — multi-series CT/PET studies with rich DICOM tags.
     source:
-      type: tcia
-      collection: HNSCC
+      type: manual
+      provider: tcia
       url: https://wiki.cancerimagingarchive.net/display/Public/HNSCC
     target_dir: tests/benchmark/public_dataset/tcia_hnscc
-    license: TCIA Restricted (see source)
+    license: TCIA Restricted (see source URL)
     approx_size: ~4 GB
     modalities: [CT, PT]
+    download_instructions: |
+      1. Open https://wiki.cancerimagingarchive.net/display/Public/HNSCC
+      2. Accept the TCIA data-use agreement on the collection page.
+      3. Download the collection. Two paths:
+           a) NBIA Data Retriever (desktop app — easiest, click-through):
+                https://wiki.cancerimagingarchive.net/display/NBIA/Downloading+TCIA+Images
+           b) Python:
+                pip install tcia_utils
+                from tcia_utils import nbia
+                series = nbia.getSeries(collection='HNSCC')
+                nbia.downloadSeries(series, path='<staging-dir>')
+      4. Place the unzipped DICOMs in <data_dir>/ (see expected_layout).
+
+      Platform tips:
+        - Colab : mount Drive, set DATA_ROOT='/content/drive/MyDrive/aegis_data',
+                  place files at <DATA_ROOT>/tcia_hnscc/ — survives runtime restarts.
+        - Kaggle: easiest is to upload the unzipped collection once as a private
+                  Kaggle Dataset (e.g. aegis-tcia-hnscc), "+ Add Data" -> mounts
+                  at /kaggle/input/aegis-tcia-hnscc/, then set DATA_ROOT='/kaggle/input'.
+                  4 GB easily fits.
+        - Local : drop files at <repo>/tests/benchmark/public_dataset/tcia_hnscc/ (default).
+    expected_layout: |
+      <data_dir>/
+        <patient_id>/
+          <study_uid>/
+            <series_uid>/
+              *.dcm
+      A flat dump of *.dcm directly under <data_dir>/ also works — the
+      benchmark walks the directory recursively.
 
   rsna_pneumonia:
     description: RSNA Pneumonia Detection Challenge — single-frame CR/DX with metadata variety.
     source:
-      type: kaggle
-      dataset: rsna-pneumonia-detection-challenge
+      type: manual
+      provider: kaggle_competition
+      slug: rsna-pneumonia-detection-challenge
       url: https://www.kaggle.com/c/rsna-pneumonia-detection-challenge
     target_dir: tests/benchmark/public_dataset/rsna_pneumonia
-    license: Kaggle competition (see source)
+    license: Kaggle competition (see source URL)
     approx_size: ~3 GB
     modalities: [CR, DX]
+    download_instructions: |
+      1. Visit https://www.kaggle.com/c/rsna-pneumonia-detection-challenge/rules
+         and click "I Understand and Accept" on the rules page (one-time per
+         account — the API and bulk download mirror website permissions).
+      2. Download the data (any of these works — pick one):
+           a) Browser: "Data" tab on the competition page -> "Download All".
+           b) Kaggle CLI:
+                pip install kaggle
+                kaggle competitions download -c rsna-pneumonia-detection-challenge
+                unzip rsna-pneumonia-detection-challenge.zip
+      3. Place the unzipped contents at <data_dir>/ (see expected_layout).
+
+      Platform tips:
+        - Colab : mount Drive, DATA_ROOT='/content/drive/MyDrive/aegis_data',
+                  place at <DATA_ROOT>/rsna_pneumonia/.
+        - Kaggle: in a Kaggle notebook, "+ Add Data" -> "Competitions" tab ->
+                  search "RSNA Pneumonia Detection Challenge" -> Add. The data
+                  appears at /kaggle/input/rsna-pneumonia-detection-challenge/
+                  with NO download required. Set:
+                    DATA_ROOT = '/kaggle/input'
+                  and either rename the symlink/dir to match the dataset_key OR
+                  set per-dataset target via the override mechanism in cell 6.
+        - Local : drop files at <repo>/tests/benchmark/public_dataset/rsna_pneumonia/.
+    expected_layout: |
+      <data_dir>/
+        stage_2_train_images/        <-- ~26000 *.dcm files
+        stage_2_test_images/         <-- *.dcm
+        stage_2_train_labels.csv
+        stage_2_detailed_class_info.csv
+      The benchmark walks recursively, so any nesting underneath is fine.
 
   busi_ultrasound:
     description: Breast Ultrasound Images (BUSI) — US PNGs with burnt-in text annotations.
     source:
-      type: kaggle
-      dataset: aryashah2k/breast-ultrasound-images-dataset
+      type: manual
+      provider: kaggle_dataset
+      slug: aryashah2k/breast-ultrasound-images-dataset
       url: https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset
     target_dir: tests/benchmark/public_dataset/busi_ultrasound
     license: CC BY 4.0
     approx_size: ~780 MB
     modalities: [US]
+    download_instructions: |
+      1. Visit https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset
+         and click "Download" (Kaggle account required — no rules to accept,
+         it's a public dataset under CC BY 4.0).
+      2. Or via CLI:
+           pip install kaggle
+           kaggle datasets download -d aryashah2k/breast-ultrasound-images-dataset
+           unzip breast-ultrasound-images-dataset.zip
+      3. Place the unzipped contents at <data_dir>/ (see expected_layout).
+
+      Platform tips:
+        - Colab : mount Drive, DATA_ROOT='/content/drive/MyDrive/aegis_data',
+                  place at <DATA_ROOT>/busi_ultrasound/.
+        - Kaggle: "+ Add Data" -> "Datasets" tab -> search "breast ultrasound" ->
+                  Add the aryashah2k version. Mounts at
+                  /kaggle/input/breast-ultrasound-images-dataset/.
+                  Set DATA_ROOT='/kaggle/input' and adjust target accordingly.
+        - Local : drop files at <repo>/tests/benchmark/public_dataset/busi_ultrasound/.
+    expected_layout: |
+      <data_dir>/
+        Dataset_BUSI_with_GT/
+          benign/      *.png + *_mask.png
+          malignant/   *.png + *_mask.png
+          normal/      *.png + *_mask.png
+      The bench script handles PNG inputs the same way as DICOM — recursive walk.
 
   nih_chestxray14:
     description: NIH Chest X-ray 14 — large-scale DX collection with diverse metadata.
     source:
-      type: http
+      type: manual
+      provider: nih_box
       url: https://nihcc.app.box.com/v/ChestXray-NIHCC
     target_dir: tests/benchmark/public_dataset/nih_chestxray14
-    license: NIH (see source)
+    license: NIH (see source URL)
     approx_size: ~42 GB
     modalities: [DX]
+    download_instructions: |
+      1. Visit https://nihcc.app.box.com/v/ChestXray-NIHCC
+      2. NIH ships this as 12 tar.gz archives (images_001.tar.gz through
+         images_012.tar.gz) totalling ~42 GB. Download whichever subset you
+         want to benchmark on — even one archive is a meaningful sample.
+      3. Extract:
+           for f in images_*.tar.gz; do tar xzf "$f"; done
+      4. Place the extracted images at <data_dir>/ (see expected_layout).
+
+      Platform tips (42 GB is large — choose carefully):
+        - Colab : Drive at this size is slow to upload AND Drive throttles
+                  bulk reads. Consider benchmarking just a subset (1-2 archives,
+                  ~7 GB). Mount Drive, DATA_ROOT='/content/drive/MyDrive/aegis_data',
+                  place at <DATA_ROOT>/nih_chestxray14/.
+        - Kaggle: full 42 GB exceeds /kaggle/working but fits in a private
+                  Kaggle Dataset. Easiest is to use the existing public mirror
+                  ("nih-chest-xrays/data") via "+ Add Data". Mounts at
+                  /kaggle/input/data/. Set DATA_ROOT='/kaggle/input'.
+        - Local : a workstation or NAS path is the realistic option for the
+                  full set; symlink it under <repo>/tests/benchmark/public_dataset/nih_chestxray14/.
+    expected_layout: |
+      <data_dir>/
+        images/                      <-- flat directory of *.png chest X-rays
+        Data_Entry_2017_v2020.csv    <-- metadata (optional but useful)
+        BBox_List_2017.csv           <-- bounding boxes (optional)
+      Subsets are fine — the benchmark just runs over whatever PNGs are present.
 
 # Defaults applied when running bench_aegis.py from the notebook unless
 # a per-dataset override is supplied.

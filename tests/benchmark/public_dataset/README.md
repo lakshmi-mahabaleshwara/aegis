@@ -65,19 +65,45 @@ full flag surface (including `--ground-truth` and `--mode series`).
 Larger collections (TCIA HNSCC, RSNA Pneumonia, BUSI, NIH Chest X-ray 14)
 are registered in [`datasets.yaml`](datasets.yaml) and driven by
 [`benchmark_large_datasets.ipynb`](benchmark_large_datasets.ipynb).
+
+**The notebook does not download these for you.** Each external source
+has its own auth flow (Kaggle credentials + ToS click-through, TCIA data-use
+agreements, NIH Box logins) and those drift over time. Stage the files
+yourself with whatever method you trust, point the notebook at them, run
+the benchmark.
+
 The notebook handles:
 
 - **Selection** — pick a registered key (`tcia_hnscc`, `rsna_pneumonia`, …).
-- **Preparation** — dispatches on `source.type` (`kaggle`, `tcia`, `http`).
-  Auth-gated sources print the next step rather than failing silently.
+- **Staging check** — resolves the data directory from `DATA_ROOT` /
+  `DATA_DIR_OVERRIDES` / the registry default and prints the entry's
+  `download_instructions` + `expected_layout` if it's empty. The
+  `pydicom_samples` tier auto-runs the prep script.
 - **Benchmark** — invokes `scripts/bench_aegis.py` with defaults from
   `benchmark_defaults` in the registry, overridable per-entry.
 - **Visualization** — runtime, redacted-region, and status histograms
   from the latest results CSV.
 
-To add a new dataset, append an entry to [`datasets.yaml`](datasets.yaml).
-If the `source.type` is one the notebook doesn't yet know about, register
-a preparer in section 4's `PREPARERS` dict.
+### Where to stage data
+
+| Platform | `DATA_ROOT` | How to get the data there |
+|---|---|---|
+| **Colab** | `/content/drive/MyDrive/aegis_data` | Mount Drive, upload once. Persists across runtime restarts. |
+| **Kaggle** | `/kaggle/input` | Right sidebar → **+ Add Data** → mount the dataset. For non-Kaggle sources, upload them once as a private Kaggle Dataset, then add it the same way. |
+| **Local / EC2 / Docker** | `None` (default) | Files go under `<repo>/tests/benchmark/public_dataset/<dataset_key>/`. |
+
+When the staged directory name doesn't match the registry key (e.g. a
+Kaggle competition mount shows up as
+`/kaggle/input/rsna-pneumonia-detection-challenge/`), use the
+`DATA_DIR_OVERRIDES` dict in section 4 of the notebook to map
+`dataset_key → absolute path`.
+
+### Adding a new dataset
+
+Append an entry under `datasets:` in [`datasets.yaml`](datasets.yaml) with
+`source.type: manual`, a `download_instructions` block, and an
+`expected_layout` block. No notebook edits are needed — the staging
+helper reads both verbatim.
 
 ---
 
