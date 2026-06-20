@@ -36,11 +36,22 @@ us_regions:
   zero_outside_regions: true   # Zero diagnostic pixels before OCR
 
 ocr:
+  engine: 'vlm'  # Options: 'easyocr', 'vlm'
   decoder: 'beamsearch'
   beam_width: 5
   confidence_threshold: 0.4
   languages: ['en']
   gpu_usage: false
+
+vlm:
+  enabled: true
+  model_name: 'microsoft/Florence-2-large'
+  device: '${AEGIS_DEVICE:cuda}'
+  # The task prompt tells Florence-2 what specific visual task to perform.
+  # <CAPTION_TO_PHRASE_GROUNDING> takes the text_input and returns bounding boxes for those concepts.
+  task_prompt: '<CAPTION_TO_PHRASE_GROUNDING>'
+  # The list of PHI entities the VLM should look for in the image
+  text_input: 'Patient Name, Medical Record Number, Patient ID, Dates, Hospital Name, Doctor Name, Date of Birth, Age, Phone Number'
 
 ner:
   enabled: true

@@ -4,3 +4,5 @@ easyocr
 pillow
 pyyaml
 transformers
+timm
+einops

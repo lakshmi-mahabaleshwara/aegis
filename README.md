@@ -24,7 +24,9 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **Content-driven discovery** — DICOM files are detected by reading the 132-byte preamble (`DICM` magic), not by file extension, so extensionless hospital exports are found automatically
 
 ### Pixel Redaction
-- **Stanford NER-based PHI detection** — semantic classification via `stanford-deidentifier-base` (F1 ≥ 97.9%)
+- **Dual Engine Architecture** — choose between the Standard EasyOCR+NER pipeline or the state-of-the-art **Vision-Language Model (VLM)** engine.
+- **End-to-End VLM Engine** — powered by Microsoft's Florence-2, enabling "Zero-Trust" edge deployment with superior contextual accuracy and zero-shot phrase grounding, eliminating the need for separate OCR and NLP steps.
+- **Stanford NER-based PHI detection** — semantic classification via `stanford-deidentifier-base` (F1 ≥ 97.9%) for the EasyOCR engine.
 - **3-layer classification pipeline**: clinical allowlist → PHI heuristics → NER model
 - **EasyOCR-based text detection** with configurable confidence thresholds
 - **US fan-geometry scoped OCR** — reads `SequenceOfUltrasoundRegions` (0018,6011) from DICOM metadata to restrict OCR to non-diagnostic zones, eliminating false positives in the clinical fan area
@@ -75,9 +77,9 @@ subset of the tags addressed by the Basic Profile.
 
 The pipeline processes files through two distinct paths:
 
-**DICOM Path** — Load DICOM → (if ultrasound: US Region Masking to scope OCR to annotation areas) → Pixel Redaction (OCR + NER on full image or scoped to non-diagnostic zones) → Metadata Scrub (tokenize patient IDs, remove private tags) → Save
+**DICOM Path** — Load DICOM → (if ultrasound: US Region Masking) → Pixel Redaction (VLM or OCR+NER on full image or scoped) → Metadata Scrub → Save
 
-**Image Path** — Load Image → Pixel Redaction (OCR + NER on full image) → Save. No metadata scrub since JPEG/PNG files have no DICOM tags.
+**Image Path** — Load Image → Pixel Redaction (VLM or OCR+NER) → Save. No metadata scrub since JPEG/PNG files have no DICOM tags.
 
 Low-confidence OCR detections on either path are routed to `staging_not_processed/` for manual review.
 
@@ -169,9 +171,17 @@ us_regions:
   zero_outside_regions: true      # Zero diagnostic pixels before OCR
 
 ocr:
+  engine: 'vlm'                   # Options: 'easyocr', 'vlm'
   languages: ['en']
   gpu_usage: false
   confidence_threshold: 0.4
+
+vlm:
+  enabled: true
+  model_name: 'microsoft/Florence-2-large'
+  device: '${AEGIS_DEVICE:cuda}'
+  task_prompt: '<CAPTION_TO_PHRASE_GROUNDING>'
+  text_input: 'Patient Name, Medical Record Number, Patient ID, Dates, Hospital Name, Doctor Name, Date of Birth, Age, Phone Number'
 
 ner:
   enabled: true                   # Set false to fall back to regex safelist
@@ -236,9 +246,14 @@ python -m monai_aegis.dicom_runner --config monai_aegis/config/config.yaml
 | GCS     | `gs`     | `gcsfs`       |
 | Azure   | `az`     | `adlfs`       |
 
+### VLM Classification Pipeline
+
+When `ocr.engine: 'vlm'` is configured, Aegis uses a Vision-Language Model (by default, `microsoft/Florence-2-large`) to perform visual grounding. 
+The VLM is passed the image and the `vlm.text_input` list, and natively returns bounding boxes specifically for the requested PHI entities, drastically reducing false positives on clinical terms.
+
 ### NER Classification Pipeline
 
-When `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline:
+When `ocr.engine: 'easyocr'` and `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline:
 
 | Layer | Source | Action | Example |
 |-------|--------|--------|---------|
@@ -396,7 +411,7 @@ mypy monai_aegis/transforms/
 
 ## 📄 License
 
-Apache 2.0 (pending)
+Apache 2.0
 
 ---
 
@@ -406,5 +421,6 @@ Apache 2.0 (pending)
 - [StanfordAIMI](https://huggingface.co/StanfordAIMI/stanford-deidentifier-base) — Stanford De-identifier NER model
 - [EasyOCR](https://github.com/JaidedAI/EasyOCR) — OCR detection library
 - [HuggingFace Transformers](https://huggingface.co/docs/transformers/) — NER pipeline
+- [Florence-2](https://huggingface.co/microsoft/Florence-2-large) — Microsoft Vision-Language Model
 - [PyDICOM](https://pydicom.github.io/) — DICOM file handling
 - [HIPAA De-identification Guidelines](https://www.hhs.gov/hipaa/for-professionals/privacy/special-topics/de-identification/index.html)

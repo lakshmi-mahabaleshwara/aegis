@@ -349,6 +349,7 @@ class RedactPixelPHI(Transform):
         self.config = config
         self._thread_local = threading.local()
         self._ner_enabled = config.get('ner', {}).get('enabled', False)
+        self._engine = config.get('ocr', {}).get('engine', 'easyocr')
 
     def __getstate__(self):
         """Exclude threading.local() from pickling for DataLoader multiprocessing."""
@@ -388,6 +389,18 @@ class RedactPixelPHI(Transform):
             logger.info("NER classifier initialized for thread: %s",
                         threading.current_thread().name)
         return self._thread_local.ner_classifier
+
+    @property
+    def vlm_classifier(self) -> Optional[Any]:
+        """Lazily create a per-thread VLM classifier (if engine is vlm)."""
+        if self._engine != 'vlm':
+            return None
+        if not hasattr(self._thread_local, 'vlm_classifier'):
+            from monai_aegis.transforms.vlm_classifier import VLMClassifier
+            self._thread_local.vlm_classifier = VLMClassifier(self.config)
+            logger.info("VLM classifier initialized for thread: %s",
+                        threading.current_thread().name)
+        return self._thread_local.vlm_classifier
 
     def __call__(self, image: np.ndarray) -> np.ndarray:
         """Detect and redact burned-in PHI text.
@@ -438,17 +451,31 @@ class RedactPixelPHI(Transform):
                 is_rgb = True
                 pixel_array = np.transpose(pixel_array, (1, 2, 0))
 
-        # Normalize to uint8 for EasyOCR
+        # Normalize to uint8 for inference
         if pixel_array.dtype != np.uint8:
             p_min, p_max = pixel_array.min(), pixel_array.max()
-            norm_ocr = (255 * (pixel_array - p_min) / (p_max - p_min + 1e-5)).astype(np.uint8)
+            norm_img = (255 * (pixel_array - p_min) / (p_max - p_min + 1e-5)).astype(np.uint8)
         else:
-            norm_ocr = pixel_array
+            norm_img = pixel_array
 
-        # Detect and Redact (with NER if enabled)
-        bboxes, self.last_stats = detect_text(
-            norm_ocr, self.reader, self.config, self.ner_classifier
-        )
+        if self._engine == 'vlm':
+            # VLM expects RGB
+            if is_grayscale or norm_img.ndim == 2:
+                norm_img_rgb = np.stack([norm_img] * 3, axis=-1)
+            else:
+                norm_img_rgb = norm_img
+            bboxes, self.last_stats = self.vlm_classifier.detect_phi_boxes(norm_img_rgb)
+        elif self._engine == 'easyocr':
+            # EasyOCR path
+            bboxes, self.last_stats = detect_text(
+                norm_img, self.reader, self.config, self.ner_classifier
+            )
+        else:
+            raise PixelRedactionError(
+                f"Unknown OCR engine configured: '{self._engine}'. Valid options are 'easyocr' or 'vlm'.",
+                transform="RedactPixelPHI._redact_single"
+            )
+            
         redacted = apply_redaction(pixel_array, bboxes)
 
         # Restore channel-first
