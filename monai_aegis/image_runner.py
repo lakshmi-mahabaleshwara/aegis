@@ -13,6 +13,7 @@ from typing import Any, Iterable
 
 from monai.data import DataLoader, Dataset
 
+from monai_aegis import reporting
 from monai_aegis.config.config_loader import load_config
 from monai_aegis.config.storage import AegisFileSystem
 from monai_aegis.transforms.discovery import discover_images
@@ -221,7 +222,7 @@ def _log_series_summary(summary: RunSummary) -> None:
 
 
 def run_single(config_path: str) -> None:
-    _config, fs, paths = _build_runner_paths(config_path, "image_folder")
+    config, fs, paths = _build_runner_paths(config_path, "image_folder")
 
     image_files = []
     walker = fs.walk(paths.pipeline_input_dir) if fs.protocol != "file" else os.walk(paths.pipeline_input_dir)
@@ -243,6 +244,7 @@ def run_single(config_path: str) -> None:
     )
 
     summary = RunSummary()
+    report = reporting.GroundTruthAccumulator(config)
     data_list = []
     for file_path in image_files:
         rel_path = os.path.relpath(file_path, paths.input_dir)
@@ -253,15 +255,17 @@ def run_single(config_path: str) -> None:
         pipeline,
         num_workers=paths.dataloader_num_workers,
     ):
+        report.collect(data_dict)
         if _handle_error_result(data_dict, paths, summary, "NOT PROCESSED (ERROR)"):
             continue
         _handle_single_result(data_dict, paths, summary, count_as_processed="processed")
 
+    report.flush(paths.output_dir)
     _log_single_summary(summary)
 
 
 def run_series(config_path: str) -> None:
-    _config, fs, paths = _build_runner_paths(config_path, "image_folder")
+    config, fs, paths = _build_runner_paths(config_path, "image_folder")
 
     image_files = discover_images(paths.pipeline_input_dir, fs=fs)
     if not image_files:
@@ -325,6 +329,7 @@ def run_series(config_path: str) -> None:
             series_data.append({"image": folder_images, "label": label, "num_slices": len(folder_images)})
 
     summary = RunSummary()
+    report = reporting.GroundTruthAccumulator(config)
 
     if singletons_data:
         for data_dict in _run_dataloader(
@@ -332,6 +337,7 @@ def run_series(config_path: str) -> None:
             pipeline_single,
             num_workers=paths.dataloader_num_workers,
         ):
+            report.collect(data_dict)
             if _handle_error_result(data_dict, paths, summary, "NOT PROCESSED (ERROR)"):
                 continue
             _handle_single_result(data_dict, paths, summary, count_as_processed="slices")
@@ -342,6 +348,7 @@ def run_series(config_path: str) -> None:
             pipeline,
             num_workers=paths.dataloader_num_workers,
         ):
+            report.collect(data_dict)
             label = data_dict.get("label", "unknown")
             if _handle_error_result(data_dict, paths, summary, f"NOT PROCESSED (ERROR): Series {label}"):
                 continue
@@ -359,6 +366,8 @@ def run_series(config_path: str) -> None:
 
             summary.series += 1
             summary.slices += num_slices
+
+    report.flush(paths.output_dir)
 
     _log_series_summary(summary)
 

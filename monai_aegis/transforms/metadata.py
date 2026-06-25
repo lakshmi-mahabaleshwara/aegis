@@ -14,6 +14,8 @@ Raises:
 import numpy as np
 import pydicom
 import pydicom.uid
+import pydicom.tag
+import pydicom.datadict
 import copy
 import torch
 import logging
@@ -61,6 +63,9 @@ class ScrubDicomMetadata(Transform):
         self.config = config
         self.identity_manager = AegisIdentityManager.from_config(config)
         self._pii_actions = self._build_pii_actions(config.get('pii_mapping', {}))
+        # Audit trail of header-tag actions applied during the most recent
+        # __call__, consumed by ground-truth reporting/validation.
+        self.last_tag_actions: list[Dict[str, Any]] = []
 
     @staticmethod
     def _parse_hex_part(s: str) -> int:
@@ -123,6 +128,7 @@ class ScrubDicomMetadata(Transform):
         """Apply one configured action to a single element on a dataset."""
         if tag not in ds:
             return
+        keyword = pydicom.datadict.keyword_for_tag(tag) or ''
         if action == 'REMOVE':
             del ds[tag]
         elif action == 'ZERO':
@@ -131,6 +137,14 @@ class ScrubDicomMetadata(Transform):
         elif action == 'DUMMY':
             token = self.identity_manager.get_token(str(ds[tag].value))
             ds[tag].value = token
+        # Record the applied action for ground-truth reporting. All three
+        # configured actions de-identify the element, so redacted=True.
+        self.last_tag_actions.append({
+            'tag': '({:04X},{:04X})'.format(tag.group, tag.element),
+            'keyword': keyword,
+            'action': action,
+            'redacted': True,
+        })
 
     def _scrub_dataset_recursive(self, ds: pydicom.Dataset) -> None:
         """Apply configured actions to this dataset and every nested sequence item."""
@@ -175,6 +189,9 @@ class ScrubDicomMetadata(Transform):
             ds = copy.deepcopy(dataset)
         else:
             ds = pydicom.dcmread(uri)
+
+        # Reset per-call audit trail before scrubbing this dataset.
+        self.last_tag_actions = []
 
         # 1. Metadata Scrubbing
         self._scrub_dataset_recursive(ds)
@@ -371,6 +388,7 @@ class ScrubDicomMetadatad(MapTransform):
         )
         scrubbed_ds.SOPInstanceUID = pydicom.uid.generate_uid()
         d[f"{key}_scrubbed_ds"] = scrubbed_ds
+        d[f"{key}_tag_actions"] = list(self.transform.last_tag_actions)
 
         scrubbed_pix = scrubbed_ds.pixel_array.astype(np.float32)
         if scrubbed_pix.ndim == 3:
@@ -419,6 +437,7 @@ class ScrubDicomMetadatad(MapTransform):
         )
 
         d[f"{key}_scrubbed_ds"] = scrubbed_ds
+        d[f"{key}_tag_actions"] = list(self.transform.last_tag_actions)
 
         # Update MetaTensor with scrubbed pixels
         if hasattr(scrubbed_ds, 'pixel_array'):
@@ -469,6 +488,7 @@ class ScrubDicomMetadatad(MapTransform):
 
         C, D, H, W = volume.shape
         scrubbed_datasets = []
+        tag_actions_per_slice = []
 
         for i, ds_orig in enumerate(datasets):
             # Extract 2D slice pixels: (C, H, W) → DICOM format
@@ -509,9 +529,11 @@ class ScrubDicomMetadatad(MapTransform):
             scrubbed_ds.SOPInstanceUID = pydicom.uid.generate_uid()
 
             scrubbed_datasets.append(scrubbed_ds)
+            tag_actions_per_slice.append(list(self.transform.last_tag_actions))
 
         # Store scrubbed list for downstream SaveDicomSeriesd
         d[f"{key}_scrubbed_datasets"] = scrubbed_datasets
+        d[f"{key}_tag_actions_per_slice"] = tag_actions_per_slice
 
         # Update volume tensor with scrubbed pixels
         scrubbed_volume = volume.copy()

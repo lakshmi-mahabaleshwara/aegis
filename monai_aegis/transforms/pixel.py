@@ -38,12 +38,36 @@ logger = logging.getLogger(__name__)
 # Helper functions
 # ---------------------------------------------------------------------------
 
+def _bbox_to_xywh(bbox: Any) -> List[int]:
+    """Convert an EasyOCR 4-corner bbox to ``[x, y, w, h]`` (top-left + size).
+
+    EasyOCR returns ``[[x0,y0],[x1,y1],[x2,y2],[x3,y3]]``. Ground-truth
+    overlay boxes use ``[x, y, w, h]``, so normalise to that convention for
+    direct IoU comparison during validation.
+    """
+    xs = [float(pt[0]) for pt in bbox]
+    ys = [float(pt[1]) for pt in bbox]
+    x0, y0 = min(xs), min(ys)
+    return [int(round(x0)), int(round(y0)),
+            int(round(max(xs) - x0)), int(round(max(ys) - y0))]
+
+
+def _make_detection(bbox: Any, text: str, prob: float, decision: str) -> Dict[str, Any]:
+    """Build one per-region audit record for ground-truth reporting."""
+    return {
+        'bbox': _bbox_to_xywh(bbox),
+        'ocr_text': str(text),
+        'confidence': round(float(prob), 4),
+        'decision': decision,
+    }
+
+
 def detect_text(
     pixel_array: np.ndarray,
     ocr_reader: easyocr.Reader,
     config: Dict[str, Any],
     ner_classifier: Optional[Any] = None,
-) -> Tuple[List[List], Dict[str, int]]:
+) -> Tuple[List[List], Dict[str, Any]]:
     """
     Detect text in an image and return bounding boxes of PHI regions.
 
@@ -70,13 +94,17 @@ def detect_text(
         PixelRedactionError: If EasyOCR or NER classification raises an error.
     """
     bboxes = []
-    stats = {
+    stats: Dict[str, Any] = {
         'total_detections': 0,
         'low_confidence_count': 0,
         'safelisted_count': 0,
         'ner_classified_count': 0,
         'redacted_count': 0,
     }
+    # Per-region audit trail (one entry per OCR detection) for ground-truth
+    # reporting/validation. Each entry: {bbox, ocr_text, confidence, decision}
+    # where decision is one of: 'redacted', 'safelisted', 'low_confidence'.
+    detections: List[Dict[str, Any]] = []
     ocr_settings = config.get('ocr', {})
 
     decoder = ocr_settings.get('decoder', 'beamsearch')
@@ -97,6 +125,7 @@ def detect_text(
         for (bbox, text, prob) in results:
             if prob < confidence_threshold:
                 stats['low_confidence_count'] += 1
+                detections.append(_make_detection(bbox, text, prob, 'low_confidence'))
             else:
                 confident_results.append((bbox, text, prob))
 
@@ -110,8 +139,10 @@ def detect_text(
                     if is_phi:
                         bboxes.append(bbox)
                         stats['redacted_count'] += 1
+                        detections.append(_make_detection(bbox, text, prob, 'redacted'))
                     else:
                         stats['safelisted_count'] += 1
+                        detections.append(_make_detection(bbox, text, prob, 'safelisted'))
         else:
             # --- Safelist Mode: regex-based clinical marker preservation ---
             safelist_patterns = config.get('safelist', [])
@@ -121,9 +152,11 @@ def detect_text(
                 is_safe = any(pattern.search(text) for pattern in compiled_patterns)
                 if is_safe:
                     stats['safelisted_count'] += 1
+                    detections.append(_make_detection(bbox, text, prob, 'safelisted'))
                 else:
                     bboxes.append(bbox)
                     stats['redacted_count'] += 1
+                    detections.append(_make_detection(bbox, text, prob, 'redacted'))
 
     except Exception as e:
         raise PixelRedactionError(
@@ -131,6 +164,7 @@ def detect_text(
             transform="detect_text",
         ) from e
 
+    stats['detections'] = detections
     return bboxes, stats
 
 
@@ -507,6 +541,17 @@ class RedactPixelPHI(Transform):
         self._vol_stats_acc = None   # reset
 
         phi_pixels = int(union_mask.sum())
+
+        # Flatten per-keyframe detections, stamping each with the frame index
+        # it was found on (acc order matches keyframe_indices order).
+        kf_indices = kf_stats.get('keyframe_indices', [])
+        volume_detections: List[Dict[str, Any]] = []
+        for frame_idx, frame_stats in zip(kf_indices, acc):
+            for det in frame_stats.get('detections', []):
+                det = dict(det)
+                det['frame_index'] = int(frame_idx)
+                volume_detections.append(det)
+
         self.last_stats = {
             'total_detections':    sum(s.get('total_detections', 0) for s in acc),
             'low_confidence_count': sum(s.get('low_confidence_count', 0) for s in acc),
@@ -515,8 +560,9 @@ class RedactPixelPHI(Transform):
             'redacted_count':      phi_pixels,
             'volume_strategy':     'adaptive_union',
             'num_slices':          D,
-            'keyframe_indices':    kf_stats.get('keyframe_indices', []),
+            'keyframe_indices':    kf_indices,
             'keyframe_stats':      kf_stats,
+            'detections':          volume_detections,
         }
 
         logger.info(

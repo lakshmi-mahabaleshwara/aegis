@@ -9,6 +9,15 @@ paths:
 runtime:
   dataloader_num_workers: 0
 
+reporting:
+  # When true (default), Aegis writes its own "ground truth" of what it
+  # detected/redacted to CSV files in the run output directory:
+  #   - aegis_pixel_detections.csv : one row per OCR region (burnt-in PHI)
+  #   - aegis_tag_actions.csv      : one row per scrubbed DICOM header tag
+  # When false, no CSVs are written — consume the per-file
+  # records from the pipeline data dict and store them in your own database.
+  save_ground_truth: true
+
 storage:
   protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file, s3, gs, az, memory
   options: {}                                    # fsspec kwargs (key, secret, endpoint_url, etc.)

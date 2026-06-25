@@ -40,6 +40,13 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **Unified orchestrator** (`monai_aegis.cli`) — `--mode auto|dicom|image`
 - **Independent scaling** — each pipeline can run on separate infrastructure
 
+### Ground-Truth Reporting & Validation
+- **Per-run "ground truth" CSVs** — when `reporting.save_ground_truth: true` (the default), each run records exactly what Aegis detected and redacted, so you can validate output against a known answer key
+- **`aegis_pixel_detections.csv`** — one row per OCR region: original/de-identified `SOPInstanceUID`, bounding box (`x, y, w, h`), frame index, OCR text, confidence, and decision (`redacted` / `safelisted` / `low_confidence`)
+- **`aegis_tag_actions.csv`** — one row per scrubbed DICOM header tag: tag, keyword, action (`REMOVE` / `DUMMY` / `ZERO`), and the original/de-identified `SOPInstanceUID`
+- **Stable join key** — the *original* `SOPInstanceUID` is preserved in both files (even though Aegis regenerates it on output), so reports join directly to external ground truth that keys on the source UID
+- **Bring-your-own-database mode** — set `reporting.save_ground_truth: false` to skip CSV writing and instead pull the same per-file records straight from the pipeline data dict via `monai_aegis.reporting.extract_records(...)`
+
 ### Cloud Storage (fsspec)
 - **Pluggable backends** — local filesystem, S3, GCS, Azure via `fsspec`
 - **Byte-stream I/O** — no temp files for cloud reads/writes
@@ -147,6 +154,11 @@ paths:
 
 runtime:
   dataloader_num_workers: 0
+
+reporting:
+  save_ground_truth: true   # true → write aegis_pixel_detections.csv + aegis_tag_actions.csv
+                            #        to the run output directory
+                            # false → no CSVs; read records from the data dict yourself
 
 storage:
   protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file, s3, gs, az
@@ -256,6 +268,79 @@ When `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline
 
 ---
 
+## 📊 Ground-Truth Reporting & Validation
+
+Aegis attacks PHI on two fronts — **burnt-in pixel text** (`RedactPixelPHId`,
+OCR + NER) and **header metadata** (`ScrubDicomMetadatad`, `pii_mapping`). When
+`reporting.save_ground_truth: true` (default), each run writes one CSV per
+stage to the run output directory, capturing exactly what was detected and
+redacted. These are Aegis's *own* ground truth and can be diffed against a
+synthetic/manual answer key to compute precision/recall.
+
+### Output location
+Reports are written alongside the cleaned files in the timestamped run
+directory:
+
+```
+staging_output/dicom/<timestamp>/
+├── <cleaned DICOM files…>
+├── aegis_pixel_detections.csv      # burnt-in pixel PHI (RedactPixelPHId)
+└── aegis_tag_actions.csv           # header tag scrubbing (ScrubDicomMetadatad)
+```
+(Image runs write to `staging_output/image/<timestamp>/`. PNG/JPEG inputs have
+no DICOM header, so `aegis_tag_actions.csv` is header-only and SOP UID columns
+are blank.)
+
+### `aegis_pixel_detections.csv` — one row per OCR region
+| Column | Meaning |
+|--------|---------|
+| `source_path` | Source file path |
+| `original_sop_uid` | SOPInstanceUID of the **source** DICOM (join key) |
+| `deid_sop_uid` | Regenerated SOPInstanceUID of the de-identified output |
+| `frame_index` | Frame the text was found on (blank for single-frame) |
+| `bbox_x, bbox_y, bbox_w, bbox_h` | Detection box (top-left + size) |
+| `ocr_text` | Text EasyOCR read |
+| `confidence` | OCR confidence |
+| `decision` | `redacted`, `safelisted`, or `low_confidence` |
+
+### `aegis_tag_actions.csv` — one row per scrubbed header tag
+| Column | Meaning |
+|--------|---------|
+| `source_path` | Source file path |
+| `original_sop_uid` / `deid_sop_uid` | Source vs. output SOPInstanceUID |
+| `tag` | DICOM tag, e.g. `(0010,0010)` |
+| `keyword` | Tag keyword, e.g. `PatientName` |
+| `action` | `REMOVE` / `DUMMY` / `ZERO` |
+| `redacted` | `True` when the action de-identified the element |
+
+### Validating against external ground truth
+The *original* `SOPInstanceUID` is preserved in both reports (Aegis regenerates
+the UID on output, but the source UID is captured before that), so the files
+join directly to ground truth keyed on the source UID:
+
+- **Pixel PHI** — join on `original_sop_uid`, match boxes by IoU, then compare
+  `decision == "redacted"` against the expected `is_phi`.
+- **Header PHI** — join on `original_sop_uid` + `tag` to confirm each expected
+  tag was acted on.
+
+### Bring-your-own-database mode
+Set `reporting.save_ground_truth: false` to skip CSV writing entirely and pull
+the same records from the pipeline data dict yourself:
+
+```python
+from monai_aegis import reporting
+from monai_aegis.transforms.pipeline import build_pipeline
+
+pipeline = build_pipeline(config_path="monai_aegis/config/config.yaml",
+                          output_dir="out", input_dir="in")
+result = pipeline({"image": "/path/to/file.dcm"})
+
+pixel_rows, tag_rows = reporting.extract_records(result)   # CSV-ready dict rows
+# → persist pixel_rows / tag_rows in your own datastore
+```
+
+---
+
 ## 🧪 Testing
 
 ```bash
@@ -278,6 +363,7 @@ aegis/
 │   ├── cli.py                        # aegis-pipeline entry point
 │   ├── dicom_runner.py               # Packaged DICOM orchestration
 │   ├── image_runner.py               # Packaged image orchestration
+│   ├── reporting.py                  # Ground-truth CSV reporting (detections + tag actions)
 │   ├── config/
 │   │   ├── config.yaml               # De-identification + NER + storage + series settings
 │   │   ├── config_loader.py          # Env var interpolation + overlay merging
@@ -309,7 +395,7 @@ aegis/
 ├── run_dicom_pipeline.py              # Compatibility wrapper for monai_aegis.dicom_runner
 ├── run_image_pipeline.py              # Compatibility wrapper for monai_aegis.image_runner
 ├── run_pipeline.py                    # Compatibility wrapper for monai_aegis.cli
-├── de-identification.ipynb            # Interactive walkthrough notebook
+├── aegis_demo.ipynb                   # Interactive walkthrough notebook
 ├── Dockerfile                         # Container build
 ├── staging_input/                     # Input files (not tracked)
 ├── staging_output/                    # Processed output (not tracked)
@@ -396,7 +482,7 @@ mypy monai_aegis/transforms/
 
 ## 📄 License
 
-Apache 2.0 (pending)
+Apache 2.0
 
 ---
 
