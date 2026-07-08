@@ -58,11 +58,33 @@ class ScrubDicomMetadata(Transform):
 
     backend = [TransformBackends.NUMPY]
 
+    # DICOM-standard / well-known UID root.  UIDs under this root identify
+    # object *types* (SOP Class, Transfer Syntax, coding schemes, ...) — never
+    # patients — so they are preserved verbatim.  Anything under an org root is
+    # an instance/study/series/frame identifier and gets re-mapped.
+    _DICOM_STANDARD_UID_ROOT = "1.2.840.10008"
+
+    # UID keywords that name an object *class* or the implementation rather
+    # than a specific instance, preserved even when they use a non-standard
+    # root (otherwise the output would no longer be a valid DICOM object).
+    _PRESERVE_UID_KEYWORDS = frozenset([
+        "SOPClassUID",
+        "MediaStorageSOPClassUID",
+        "TransferSyntaxUID",
+        "ImplementationClassUID",
+        "ReferencedSOPClassUID",
+    ])
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
         self.config = config
         self.identity_manager = AegisIdentityManager.from_config(config)
         self._pii_actions = self._build_pii_actions(config.get('pii_mapping', {}))
+        # Deterministic UID remapping is keyed off the same secret salt as
+        # identity tokenization so the mapping is reproducible across slices,
+        # files, and runs (required to keep Study/Series links consistent).
+        self._uid_salt = self.identity_manager.salt
+        self._uid_cache: Dict[str, str] = {}
         # Audit trail of header-tag actions applied during the most recent
         # __call__, consumed by ground-truth reporting/validation.
         self.last_tag_actions: list[Dict[str, Any]] = []
