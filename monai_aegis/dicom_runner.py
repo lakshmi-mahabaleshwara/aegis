@@ -15,6 +15,8 @@ from monai.data import DataLoader, Dataset
 from monai_aegis import reporting
 from monai_aegis.config.config_loader import load_config
 from monai_aegis.config.storage import AegisFileSystem
+from monai_aegis.transforms import context_keys as ckeys
+from monai_aegis.transforms.context_keys import ck
 from monai_aegis.transforms.discovery import (
     discover_dicoms,
     group_into_series,
@@ -154,9 +156,10 @@ def _quarantine_many(files: Iterable[str], paths: RunnerPaths, reason: str) -> N
 def _cleanup_output(data_dict: dict[str, Any], paths: RunnerPaths, file_path: str) -> None:
     rel_path = os.path.relpath(file_path, paths.pipeline_input_dir)
     filename = os.path.basename(file_path)
-    out_path = data_dict.get("image_saved_path", os.path.join(paths.output_dir, filename))
+    saved_key = ck("image", ckeys.SAVED_PATH)
+    out_path = data_dict.get(saved_key, os.path.join(paths.output_dir, filename))
     if out_path == os.path.join(paths.output_dir, filename):
-        out_path = data_dict.get("image_saved_path", os.path.join(paths.output_dir, rel_path))
+        out_path = data_dict.get(saved_key, os.path.join(paths.output_dir, rel_path))
     if os.path.exists(out_path):
         os.remove(out_path)
 
@@ -183,7 +186,7 @@ def _handle_single_result(
     if file_path == "unknown":
         return
 
-    stats_dict = data_dict.get("image_redaction_stats", {})
+    stats_dict = data_dict.get(ck("image", ckeys.REDACTION_STATS), {})
     low_conf = stats_dict.get("low_confidence_count", 0)
 
     if low_conf > 0:
@@ -192,7 +195,7 @@ def _handle_single_result(
         summary.not_processed += 1
         return
 
-    out_path = data_dict.get("image_saved_path", os.path.join(paths.output_dir, os.path.basename(file_path)))
+    out_path = data_dict.get(ck("image", ckeys.SAVED_PATH), os.path.join(paths.output_dir, os.path.basename(file_path)))
     if os.path.exists(out_path):
         logger.info("Saved DICOM -> %s", out_path)
         if count_as_processed == "processed":
@@ -327,9 +330,9 @@ def run_series(config_path: str) -> None:
             if _handle_error_result(data_dict, paths, summary, f"NOT PROCESSED (ERROR): Series {label}"):
                 continue
 
-            stats_dict = data_dict.get("image_redaction_stats", {})
+            stats_dict = data_dict.get(ck("image", ckeys.REDACTION_STATS), {})
             strategy = stats_dict.get("volume_strategy", "unknown")
-            target_token = data_dict.get("image_target_token")
+            target_token = data_dict.get(ck("image", ckeys.TARGET_TOKEN))
             out_msg = f"Token: {target_token}" if target_token else "Original structure"
             num_slices = data_dict.get("num_slices", 0)
 
@@ -376,3 +379,7 @@ def main() -> None:
 
 
 __all__ = ["main", "run_series", "run_single"]
+
+
+if __name__ == "__main__":
+    main()

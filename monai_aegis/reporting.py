@@ -5,7 +5,9 @@ runners use this module to flatten each processed file's redaction records
 into CSV files written to the run output directory:
 
   - ``aegis_pixel_detections.csv`` — one row per OCR region (burnt-in PHI).
-  - ``aegis_tag_actions.csv``      — one row per scrubbed DICOM header tag.
+  - ``aegis_tag_actions.csv``      — one row per scrubbed DICOM header tag
+    (DICOM runs only — JPEG/PNG images have no tags, so the image runner
+    does not create this file).
 
 Both files carry the **original** ``SOPInstanceUID`` (preserved from the
 cached source dataset) alongside the regenerated de-identified UID, so they
@@ -18,7 +20,10 @@ them in your own database.
 import csv
 import logging
 import os
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+from monai_aegis.transforms import context_keys as ckeys
+from monai_aegis.transforms.context_keys import ck
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +52,7 @@ def _sop_uid(ds: Any) -> str:
 
 
 def _source_path(data_dict: Dict[Any, Any], key: str) -> str:
-    meta = data_dict.get(f"{key}_meta_dict", {}) or {}
+    meta = data_dict.get(ck(key, ckeys.META_DICT), {}) or {}
     fpath = meta.get("filename_or_obj", "")
     if isinstance(fpath, (list, tuple)):
         fpath = fpath[0] if fpath else ""
@@ -60,17 +65,17 @@ def _uid_pairs(data_dict: Dict[Any, Any], key: str) -> Tuple[List[Tuple[str, str
     Single-file / multi-frame inputs yield a single pair; a multi-file series
     yields one pair per slice, index-aligned with the slice/frame index.
     """
-    scrub_list = data_dict.get(f"{key}_scrubbed_datasets")
+    scrub_list = data_dict.get(ck(key, ckeys.SCRUBBED_DATASETS))
     if isinstance(scrub_list, list):
-        orig_list = data_dict.get(f"{key}_dicom_datasets") or []
+        orig_list = data_dict.get(ck(key, ckeys.DICOM_DATASETS)) or []
         pairs = []
         for i, sds in enumerate(scrub_list):
             ods = orig_list[i] if i < len(orig_list) else None
             pairs.append((_sop_uid(ods), _sop_uid(sds)))
         return pairs, True
 
-    orig = data_dict.get(f"{key}_dicom_dataset")
-    scrub = data_dict.get(f"{key}_scrubbed_ds")
+    orig = data_dict.get(ck(key, ckeys.DICOM_DATASET))
+    scrub = data_dict.get(ck(key, ckeys.SCRUBBED_DS))
     return [(_sop_uid(orig), _sop_uid(scrub))], False
 
 
@@ -90,7 +95,7 @@ def extract_records(
 
     # --- Pixel detections (burnt-in PHI) ---
     pixel_rows: List[Dict[str, Any]] = []
-    stats = data_dict.get(f"{key}_redaction_stats", {}) or {}
+    stats = data_dict.get(ck(key, ckeys.REDACTION_STATS), {}) or {}
     for det in stats.get("detections", []):
         frame_index = det.get("frame_index")
         orig_uid, deid_uid = default_orig, default_deid
@@ -111,14 +116,14 @@ def extract_records(
 
     # --- Header-tag actions ---
     tag_rows: List[Dict[str, Any]] = []
-    per_slice = data_dict.get(f"{key}_tag_actions_per_slice")
+    per_slice = data_dict.get(ck(key, ckeys.TAG_ACTIONS_PER_SLICE))
     if isinstance(per_slice, list):
         for i, actions in enumerate(per_slice):
             orig_uid, deid_uid = pairs[i] if i < len(pairs) else (default_orig, default_deid)
             tag_rows.extend(_tag_rows(actions, source_path, orig_uid, deid_uid))
     else:
         tag_rows.extend(_tag_rows(
-            data_dict.get(f"{key}_tag_actions", []),
+            data_dict.get(ck(key, ckeys.TAG_ACTIONS), []),
             source_path, default_orig, default_deid,
         ))
 
@@ -142,20 +147,24 @@ def _tag_rows(actions: Any, source_path: str, orig_uid: str, deid_uid: str) -> L
 
 def write_reports(
     pixel_rows: List[Dict[str, Any]],
-    tag_rows: List[Dict[str, Any]],
+    tag_rows: Optional[List[Dict[str, Any]]],
     output_dir: str,
 ) -> List[str]:
     """Write the accumulated rows to CSV files in ``output_dir``.
 
-    Always emits both files (with headers) even when empty, so downstream
-    validation can rely on their presence. Returns the paths written.
+    Empty lists still emit a header-only file so downstream validation can
+    rely on its presence. Pass ``tag_rows=None`` when header-tag scrubbing
+    is not applicable to the run (e.g. the JPEG/PNG image pipeline, which
+    has no DICOM tags) — the tag-actions file is then not created at all.
+
+    Returns the paths written.
     """
     os.makedirs(output_dir, exist_ok=True)
+    targets = [(PIXEL_DETECTIONS_FILE, PIXEL_FIELDS, pixel_rows)]
+    if tag_rows is not None:
+        targets.append((TAG_ACTIONS_FILE, TAG_FIELDS, tag_rows))
     written = []
-    for filename, fields, rows in (
-        (PIXEL_DETECTIONS_FILE, PIXEL_FIELDS, pixel_rows),
-        (TAG_ACTIONS_FILE, TAG_FIELDS, tag_rows),
-    ):
+    for filename, fields, rows in targets:
         path = os.path.join(output_dir, filename)
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fields)
@@ -173,10 +182,17 @@ class GroundTruthAccumulator:
     caller is expected to read records from each result dict directly (e.g.
     via :func:`extract_records`) and persist them elsewhere. Shared by the
     DICOM and image runners.
+
+    Args:
+        config: Loaded pipeline configuration.
+        include_tag_actions: Set False for runs where header-tag scrubbing
+            is not applicable (JPEG/PNG images have no DICOM tags) — the
+            tag-actions CSV is then not written at all.
     """
 
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: Dict[str, Any], include_tag_actions: bool = True) -> None:
         self.enabled = is_enabled(config)
+        self.include_tag_actions = include_tag_actions
         self.pixel_rows: List[Dict[str, Any]] = []
         self.tag_rows: List[Dict[str, Any]] = []
 
@@ -185,12 +201,17 @@ class GroundTruthAccumulator:
             return
         pixel_rows, tag_rows = extract_records(data_dict, key)
         self.pixel_rows.extend(pixel_rows)
-        self.tag_rows.extend(tag_rows)
+        if self.include_tag_actions:
+            self.tag_rows.extend(tag_rows)
 
     def flush(self, output_dir: str) -> None:
         if not self.enabled:
             return
-        write_reports(self.pixel_rows, self.tag_rows, output_dir)
+        write_reports(
+            self.pixel_rows,
+            self.tag_rows if self.include_tag_actions else None,
+            output_dir,
+        )
 
 
 __all__ = ["is_enabled", "extract_records", "write_reports", "GroundTruthAccumulator"]

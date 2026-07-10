@@ -22,6 +22,8 @@ Example::
     from monai_aegis.transforms import build_series_pipeline, discover_dicoms
     series_pipeline = build_series_pipeline(config_path="config/config.yaml", output_dir="./output")
 """
+from monai_aegis.transforms import context_keys
+from monai_aegis.transforms.context_keys import ck
 from monai_aegis.transforms.io import LoadDicomRaw, LoadDicomRawd, SaveDicom, SaveDicomd
 from monai_aegis.transforms.series_io import LoadDicomSeries, LoadDicomSeriesd, SaveDicomSeries, SaveDicomSeriesd
 from monai_aegis.transforms.pixel import RedactPixelPHI, RedactPixelPHId
@@ -50,6 +52,9 @@ from monai_aegis.transforms.exceptions import (
 )
 
 __all__ = [
+    # Inter-transform data-dict contract
+    "context_keys",
+    "ck",
     # I/O (single-file)
     "LoadDicomRaw",
     "LoadDicomRawd",

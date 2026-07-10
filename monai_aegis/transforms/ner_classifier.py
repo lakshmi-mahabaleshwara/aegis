@@ -16,10 +16,13 @@ PHI heuristic patterns) are loaded from config.yaml under the ``ner`` section.
 
 Thread-safe: uses threading.local() for per-thread model instances.
 """
+import os
 import re
 import threading
 import logging
 from typing import List, Dict, Any, Optional
+
+from monai_aegis.config.config_loader import as_bool
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +60,13 @@ class PHIClassifier:
         self._thread_local = threading.local()
         ner_config = config.get('ner', {})
         self.model_name = ner_config.get('model_name', 'StanfordAIMI/stanford-deidentifier-base')
+        # Exact model-repo commit from config.yaml (ner.model_revision) —
+        # pinned there so the model cannot silently change under a
+        # deployment. None/empty floats on the repo's default branch.
+        self.model_revision = ner_config.get('model_revision') or None
+        # Air-gapped mode: resolve the model from the local HF cache only —
+        # no network calls, even for revision/update checks.
+        self.local_files_only = as_bool(ner_config.get('local_files_only'), default=False)
         self.device = ner_config.get('device', 'cpu')
 
         # Load all classification rules from config
@@ -75,16 +85,26 @@ class PHIClassifier:
     def pipeline(self):
         """Lazily create a per-thread NER pipeline."""
         if not hasattr(self._thread_local, 'pipeline'):
+            if self.local_files_only:
+                # HF honours these process-wide flags across tokenizer,
+                # config, and model loading — the only reliable way to
+                # guarantee zero network traffic in air-gapped deployments.
+                os.environ.setdefault('HF_HUB_OFFLINE', '1')
+                os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')
             from transformers import pipeline as hf_pipeline
             logger.info(
-                "Loading NER model '%s' on device '%s' (thread: %s)",
-                self.model_name, self.device, threading.current_thread().name
+                "Loading NER model '%s' (revision: %s, offline: %s) on device '%s' (thread: %s)",
+                self.model_name, self.model_revision or 'default',
+                self.local_files_only, self.device,
+                threading.current_thread().name,
             )
             self._thread_local.pipeline = hf_pipeline(
                 'token-classification',
                 model=self.model_name,
+                revision=self.model_revision,
                 device=self.device,
                 aggregation_strategy='simple',
+                model_kwargs={'local_files_only': self.local_files_only},
             )
         return self._thread_local.pipeline
 

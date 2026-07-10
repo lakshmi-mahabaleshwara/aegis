@@ -50,10 +50,24 @@ ocr:
   confidence_threshold: 0.4
   languages: ['en']
   gpu_usage: false
+  # Air-gapped deployment: point at a pre-bundled EasyOCR weights directory
+  # (populate with scripts/prefetch_models.py). Empty = EasyOCR default (~/.EasyOCR).
+  model_storage_directory: '${AEGIS_OCR_MODEL_DIR:}'
+  # Set false to guarantee EasyOCR never touches the network (weights must
+  # already exist in model_storage_directory or the default cache).
+  download_enabled: '${AEGIS_MODEL_DOWNLOADS:true}'
 
 ner:
   enabled: true
   model_name: 'StanfordAIMI/stanford-deidentifier-base'
+  # Exact commit of the model repo on HuggingFace — pinned so the model
+  # cannot silently change under a deployment. Bump deliberately, with
+  # re-validation. Empty = float on the repo's default branch (not recommended).
+  model_revision: '661b9c1c717d3165512d440abc3700c386aefab6'
+  # Air-gapped deployment: true = resolve the model from the local
+  # HuggingFace cache only, zero network calls (even update checks).
+  # Prefetch with scripts/prefetch_models.py first.
+  local_files_only: '${AEGIS_HF_OFFLINE:false}'
   device: '${AEGIS_DEVICE:cpu}'  # options: 'cpu', 'cuda', 'mps'
 
   # NER entity types treated as PHI (text matching these → redacted)

@@ -16,6 +16,9 @@ from typing import Dict, Hashable, Mapping, Any, Optional, Tuple
 from monai.config import KeysCollection
 from monai.transforms import Transform, MapTransform
 
+from monai_aegis.transforms import context_keys as ckeys
+from monai_aegis.transforms.context_keys import ck
+
 __all__ = ["RedactByUSRegions", "RedactByUSRegionsd"]
 
 logger = logging.getLogger(__name__)
@@ -252,11 +255,11 @@ class RedactByUSRegionsd(MapTransform):
         d = dict(data)
         for key in self.key_iterator(d):
             # Read cached Dataset (written by LoadDicomRawd / LoadDicomSeriesd)
-            dataset = d.get(f"{key}_dicom_dataset")
+            dataset = d.get(ck(key, ckeys.DICOM_DATASET))
             datasets_list: Optional[list] = None
             if dataset is None:
                 # Series mode: check the list of datasets
-                raw = d.get(f"{key}_dicom_datasets")
+                raw = d.get(ck(key, ckeys.DICOM_DATASETS))
                 if raw and isinstance(raw, list):
                     datasets_list = raw
                     dataset = datasets_list[0]  # used only to verify presence
@@ -295,7 +298,7 @@ class RedactByUSRegionsd(MapTransform):
                 mask = self.transform(dataset, image_height, image_width)
 
             if mask is not None:
-                d[f"{key}_us_phi_mask"] = mask
+                d[ck(key, ckeys.US_PHI_MASK)] = mask
                 logger.info(
                     "US PHI mask written to data dict for key '%s' (%dx%d)",
                     key, image_width, image_height,

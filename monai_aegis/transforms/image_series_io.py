@@ -24,6 +24,8 @@ from monai.transforms import MapTransform, ThreadUnsafe, Transform
 from monai.utils.enums import TransformBackends
 
 from monai_aegis.transforms.exceptions import SeriesLoadError, SeriesSaveError
+from monai_aegis.transforms import context_keys as ckeys
+from monai_aegis.transforms.context_keys import ck
 
 __all__ = ["LoadImageSeries", "LoadImageSeriesd", "SaveImageSeries", "SaveImageSeriesd"]
 
@@ -107,8 +109,8 @@ class LoadImageSeriesd(MapTransform):
             try:
                 meta_tensor = self.transform(uris, fs=self.fs)
                 d[key] = meta_tensor
-                d[f"{key}_meta_dict"] = meta_tensor.meta
-                
+                d[ck(key, ckeys.META_DICT)] = meta_tensor.meta
+
                 from monai_aegis.transforms.utility import resolve_target_token
                 target_token = resolve_target_token(
                     uri=uris[0],
@@ -117,7 +119,7 @@ class LoadImageSeriesd(MapTransform):
                     fs=self.fs,
                 )
 
-                d[f"{key}_target_token"] = target_token
+                d[ck(key, ckeys.TARGET_TOKEN)] = target_token
                 
             except SeriesLoadError:
                 raise
@@ -211,16 +213,16 @@ class SaveImageSeriesd(MapTransform, ThreadUnsafe):
         d = dict(data)
         for key in self.key_iterator(d):
             tensor = d[key]
-            meta = d.get(f"{key}_meta_dict", {})
+            meta = d.get(ck(key, ckeys.META_DICT), {})
             original_uris = meta.get('slice_uris', [])
 
             try:
                 out_paths = self.saver(
                     tensor=tensor,
                     original_uris=original_uris,
-                    target_token=d.get(f"{key}_target_token"),
+                    target_token=d.get(ck(key, ckeys.TARGET_TOKEN)),
                 )
-                d[f"{key}_saved_paths"] = out_paths
+                d[ck(key, ckeys.SAVED_PATHS)] = out_paths
             except SeriesSaveError:
                 raise
             except Exception as e:

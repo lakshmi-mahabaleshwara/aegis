@@ -27,6 +27,8 @@ from monai.utils.enums import TransformBackends
 
 from monai_aegis.transforms.utility import AegisIdentityManager
 from monai_aegis.transforms.exceptions import MetadataScrubError
+from monai_aegis.transforms import context_keys as ckeys
+from monai_aegis.transforms.context_keys import ck
 
 __all__ = ["ScrubDicomMetadata", "ScrubDicomMetadatad"]
 
@@ -84,10 +86,10 @@ class ScrubDicomMetadata(Transform):
         # identity tokenization so the mapping is reproducible across slices,
         # files, and runs (required to keep Study/Series links consistent).
         self._uid_salt = self.identity_manager.salt
+        # Shared across threads by design (consistent UID remapping across
+        # slices); dict get/set are atomic under the GIL and a lost race
+        # only costs a recomputed hash, never an inconsistent mapping.
         self._uid_cache: Dict[str, str] = {}
-        # Audit trail of header-tag actions applied during the most recent
-        # __call__, consumed by ground-truth reporting/validation.
-        self.last_tag_actions: list[Dict[str, Any]] = []
 
     @staticmethod
     def _parse_hex_part(s: str) -> int:
@@ -146,8 +148,19 @@ class ScrubDicomMetadata(Transform):
             actions[tag] = str(action).upper()
         return actions
 
-    def _apply_action(self, ds: pydicom.Dataset, tag: pydicom.tag.BaseTag, action: str) -> None:
-        """Apply one configured action to a single element on a dataset."""
+    def _apply_action(
+        self,
+        ds: pydicom.Dataset,
+        tag: pydicom.tag.BaseTag,
+        action: str,
+        tag_actions: list,
+    ) -> None:
+        """Apply one configured action to a single element on a dataset.
+
+        Appends the audit record to *tag_actions* (owned by the current
+        :meth:`scrub` call) rather than instance state, so concurrent
+        calls cannot interleave their audit trails.
+        """
         if tag not in ds:
             return
         keyword = pydicom.datadict.keyword_for_tag(tag) or ''
@@ -161,23 +174,23 @@ class ScrubDicomMetadata(Transform):
             ds[tag].value = token
         # Record the applied action for ground-truth reporting. All three
         # configured actions de-identify the element, so redacted=True.
-        self.last_tag_actions.append({
+        tag_actions.append({
             'tag': '({:04X},{:04X})'.format(tag.group, tag.element),
             'keyword': keyword,
             'action': action,
             'redacted': True,
         })
 
-    def _scrub_dataset_recursive(self, ds: pydicom.Dataset) -> None:
+    def _scrub_dataset_recursive(self, ds: pydicom.Dataset, tag_actions: list) -> None:
         """Apply configured actions to this dataset and every nested sequence item."""
         for elem in list(ds):
             if elem.VR == "SQ":
                 for item in elem.value:
                     if isinstance(item, pydicom.Dataset):
-                        self._scrub_dataset_recursive(item)
+                        self._scrub_dataset_recursive(item, tag_actions)
             action = self._pii_actions.get(elem.tag)
             if action is not None:
-                self._apply_action(ds, elem.tag, action)
+                self._apply_action(ds, elem.tag, action, tag_actions)
 
     def _remove_private_tags_recursive(self, ds: pydicom.Dataset) -> None:
         """Remove private tags from this dataset and nested sequence items."""
@@ -194,14 +207,36 @@ class ScrubDicomMetadata(Transform):
         pixel_data: Optional[np.ndarray] = None,
         dataset: Optional[pydicom.Dataset] = None
     ) -> pydicom.Dataset:
+        """Scrub a dataset, discarding the audit record.
+
+        Standard array-transform contract. Callers that need the per-tag
+        audit trail should use :meth:`scrub`, which returns
+        ``(dataset, tag_actions)``.
         """
+        ds, _ = self.scrub(uri, pixel_data=pixel_data, dataset=dataset)
+        return ds
+
+    def scrub(
+        self,
+        uri: str,
+        pixel_data: Optional[np.ndarray] = None,
+        dataset: Optional[pydicom.Dataset] = None
+    ) -> tuple:
+        """Scrub PII and return the dataset together with its audit trail.
+
+        Stateless with respect to the transform instance — the audit
+        record flows back as a return value, never through instance
+        attributes, so a single instance is safe to share across threads.
+
         Args:
             uri: Path to the DICOM file (fallback if dataset is None).
             pixel_data: Optional redacted pixel array to inject.
             dataset: Optional in-memory dataset to process.
 
         Returns:
-            Scrubbed pydicom Dataset (in-memory, not saved to disk).
+            Tuple of ``(scrubbed_dataset, tag_actions)`` where
+            ``tag_actions`` is a list of per-tag audit dicts
+            (``{'tag', 'keyword', 'action', 'redacted'}``).
 
         Raises:
             MetadataScrubError: If tag parsing or pixel injection fails
@@ -212,11 +247,11 @@ class ScrubDicomMetadata(Transform):
         else:
             ds = pydicom.dcmread(uri)
 
-        # Reset per-call audit trail before scrubbing this dataset.
-        self.last_tag_actions = []
+        # Per-call audit trail, owned by this invocation.
+        tag_actions: list = []
 
         # 1. Metadata Scrubbing
-        self._scrub_dataset_recursive(ds)
+        self._scrub_dataset_recursive(ds, tag_actions)
         self._remove_private_tags_recursive(ds)
 
         # 2. Pixel Data Injection (in-memory only)
@@ -271,7 +306,7 @@ class ScrubDicomMetadata(Transform):
             ds.WindowCenter = str((p_max + p_min) / 2)
             ds.WindowWidth = str(p_max - p_min)
 
-        return ds
+        return ds, tag_actions
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +371,7 @@ class ScrubDicomMetadatad(MapTransform):
         d = dict(data)
         for key in self.key_iterator(d):
             try:
-                meta = d.get(f"{key}_meta_dict", {})
+                meta = d.get(ck(key, ckeys.META_DICT), {})
                 fpath = meta.get('filename_or_obj')
                 if isinstance(fpath, list):
                     fpath = fpath[0]
@@ -344,13 +379,13 @@ class ScrubDicomMetadatad(MapTransform):
                     continue
 
                 # Only handle files that were loaded as DICOM (content-driven)
-                has_dataset = (f"{key}_dicom_dataset" in d or
-                               f"{key}_dicom_datasets" in d)
+                has_dataset = (ck(key, ckeys.DICOM_DATASET) in d or
+                               ck(key, ckeys.DICOM_DATASETS) in d)
                 if not has_dataset:
                     continue
 
                 # ---- Series mode: list of datasets ----
-                datasets_list = d.get(f"{key}_dicom_datasets")
+                datasets_list = d.get(ck(key, ckeys.DICOM_DATASETS))
                 if datasets_list is not None and isinstance(datasets_list, list):
                     if meta.get("is_multiframe"):
                         d = self._scrub_multiframe(d, key, datasets_list[0])
@@ -402,15 +437,15 @@ class ScrubDicomMetadatad(MapTransform):
             orig_max = dataset.get("LargestImagePixelValue", 4095)
             pixel_data = pixel_data * orig_max
 
-        fpath = d.get(f"{key}_meta_dict", {}).get("filename_or_obj", "")
-        scrubbed_ds = self.transform(
+        fpath = d.get(ck(key, ckeys.META_DICT), {}).get("filename_or_obj", "")
+        scrubbed_ds, tag_actions = self.transform.scrub(
             uri=str(fpath),
             pixel_data=pixel_data.astype(dataset.pixel_array.dtype),
             dataset=dataset,
         )
         scrubbed_ds.SOPInstanceUID = pydicom.uid.generate_uid()
-        d[f"{key}_scrubbed_ds"] = scrubbed_ds
-        d[f"{key}_tag_actions"] = list(self.transform.last_tag_actions)
+        d[ck(key, ckeys.SCRUBBED_DS)] = scrubbed_ds
+        d[ck(key, ckeys.TAG_ACTIONS)] = tag_actions
 
         scrubbed_pix = scrubbed_ds.pixel_array.astype(np.float32)
         if scrubbed_pix.ndim == 3:
@@ -444,7 +479,7 @@ class ScrubDicomMetadatad(MapTransform):
                 pix = np.transpose(pix, (1, 2, 0))
 
         # Handle normalized float arrays using cached dataset
-        ds_orig = d.get(f"{key}_dicom_dataset")
+        ds_orig = d.get(ck(key, ckeys.DICOM_DATASET))
         if ds_orig is None:
             ds_orig = pydicom.dcmread(fpath)
 
@@ -452,14 +487,14 @@ class ScrubDicomMetadatad(MapTransform):
             orig_max = ds_orig.get("LargestImagePixelValue", 4095)
             pix = (pix * orig_max)
 
-        scrubbed_ds = self.transform(
+        scrubbed_ds, tag_actions = self.transform.scrub(
             uri=fpath,
             pixel_data=pix.astype(ds_orig.pixel_array.dtype),
             dataset=ds_orig
         )
 
-        d[f"{key}_scrubbed_ds"] = scrubbed_ds
-        d[f"{key}_tag_actions"] = list(self.transform.last_tag_actions)
+        d[ck(key, ckeys.SCRUBBED_DS)] = scrubbed_ds
+        d[ck(key, ckeys.TAG_ACTIONS)] = tag_actions
 
         # Update MetaTensor with scrubbed pixels
         if hasattr(scrubbed_ds, 'pixel_array'):
@@ -481,7 +516,6 @@ class ScrubDicomMetadatad(MapTransform):
     _GEOMETRY_TAGS = frozenset([
         'PixelSpacing', 'SliceThickness', 'ImageOrientationPatient',
         'ImagePositionPatient', 'SpacingBetweenSlices',
-        'ImagePositionPatient',
     ])
 
     def _scrub_series(
@@ -505,7 +539,7 @@ class ScrubDicomMetadatad(MapTransform):
         if volume.ndim != 4:
             logger.warning("Expected 4D volume for series scrub, got %dD", volume.ndim)
             # Fallback: treat as single
-            fpath = d.get(f"{key}_meta_dict", {}).get('filename_or_obj', '')
+            fpath = d.get(ck(key, ckeys.META_DICT), {}).get('filename_or_obj', '')
             return self._scrub_single(d, key, str(fpath))
 
         C, D, H, W = volume.shape
@@ -525,7 +559,7 @@ class ScrubDicomMetadatad(MapTransform):
                 orig_max = ds_orig.get("LargestImagePixelValue", 4095)
                 slice_pix = (slice_pix * orig_max)
 
-            fpath_i = d.get(f"{key}_meta_dict", {}).get(
+            fpath_i = d.get(ck(key, ckeys.META_DICT), {}).get(
                 'slice_uris', ['']
             )
             fp = fpath_i[i] if i < len(fpath_i) else fpath_i[0]
@@ -537,7 +571,7 @@ class ScrubDicomMetadatad(MapTransform):
                     saved_geometry[tag_name] = getattr(ds_orig, tag_name)
 
             # Scrub metadata + inject redacted pixels
-            scrubbed_ds = self.transform(
+            scrubbed_ds, slice_tag_actions = self.transform.scrub(
                 uri=fp,
                 pixel_data=slice_pix.astype(ds_orig.pixel_array.dtype),
                 dataset=ds_orig
@@ -551,11 +585,11 @@ class ScrubDicomMetadatad(MapTransform):
             scrubbed_ds.SOPInstanceUID = pydicom.uid.generate_uid()
 
             scrubbed_datasets.append(scrubbed_ds)
-            tag_actions_per_slice.append(list(self.transform.last_tag_actions))
+            tag_actions_per_slice.append(slice_tag_actions)
 
         # Store scrubbed list for downstream SaveDicomSeriesd
-        d[f"{key}_scrubbed_datasets"] = scrubbed_datasets
-        d[f"{key}_tag_actions_per_slice"] = tag_actions_per_slice
+        d[ck(key, ckeys.SCRUBBED_DATASETS)] = scrubbed_datasets
+        d[ck(key, ckeys.TAG_ACTIONS_PER_SLICE)] = tag_actions_per_slice
 
         # Update volume tensor with scrubbed pixels
         scrubbed_volume = volume.copy()

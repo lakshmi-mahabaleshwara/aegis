@@ -28,6 +28,8 @@ from monai.transforms import MapTransform, ThreadUnsafe, Transform
 from monai.utils.enums import TransformBackends
 
 from monai_aegis.transforms.exceptions import SeriesLoadError, SeriesSaveError
+from monai_aegis.transforms import context_keys as ckeys
+from monai_aegis.transforms.context_keys import ck
 
 __all__ = ["LoadDicomSeries", "LoadDicomSeriesd", "SaveDicomSeries", "SaveDicomSeriesd"]
 
@@ -287,12 +289,12 @@ class LoadDicomSeriesd(MapTransform):
                             datasets.append(pydicom.dcmread(f))
                     else:
                         datasets.append(pydicom.dcmread(fp))
-                d[f"{key}_dicom_datasets"] = datasets
+                d[ck(key, ckeys.DICOM_DATASETS)] = datasets
 
                 meta_tensor = self.transform(uris, datasets=datasets, fs=self.fs)
                 d[key] = meta_tensor
-                d[f"{key}_meta_dict"] = meta_tensor.meta
-                
+                d[ck(key, ckeys.META_DICT)] = meta_tensor.meta
+
                 from monai_aegis.transforms.utility import resolve_target_token
                 target_token = resolve_target_token(
                     uri=uris[0],
@@ -301,7 +303,7 @@ class LoadDicomSeriesd(MapTransform):
                     fs=self.fs,
                 )
 
-                d[f"{key}_target_token"] = target_token
+                d[ck(key, ckeys.TARGET_TOKEN)] = target_token
                 
             except SeriesLoadError:
                 raise
@@ -443,6 +445,9 @@ class SaveDicomSeriesd(MapTransform, ThreadUnsafe):
         Uses ``slice_uris`` from the metadata to preserve the
         original folder structure and filenames.
 
+        A loaded series that was never scrubbed raises — un-de-identified
+        data must never be silently dropped.
+
         Args:
             data: Pipeline data dictionary.
 
@@ -450,15 +455,22 @@ class SaveDicomSeriesd(MapTransform, ThreadUnsafe):
             The data dictionary (unmodified — saving is a side-effect).
 
         Raises:
-            SeriesSaveError: If any slice cannot be written.
+            SeriesSaveError: If the scrub stage did not run for a loaded
+                series, or any slice cannot be written.
         """
         d = dict(data)
         for key in self.key_iterator(d):
-            meta = d.get(f"{key}_meta_dict", {})
+            meta = d.get(ck(key, ckeys.META_DICT), {})
             if meta.get("is_multiframe"):
-                scrubbed_ds = d.get(f"{key}_scrubbed_ds")
+                scrubbed_ds = d.get(ck(key, ckeys.SCRUBBED_DS))
                 if scrubbed_ds is None:
-                    continue
+                    raise SeriesSaveError(
+                        "No scrubbed dataset in pipeline data for a loaded "
+                        "multi-frame DICOM — was ScrubDicomMetadatad run "
+                        "before SaveDicomSeriesd?",
+                        uri=str(meta.get("filename_or_obj", "")),
+                        transform="SaveDicomSeriesd",
+                    )
 
                 original_uri = meta.get("filename_or_obj")
                 if isinstance(original_uri, list):
@@ -476,9 +488,11 @@ class SaveDicomSeriesd(MapTransform, ThreadUnsafe):
                     out_path = saver(
                         dataset=scrubbed_ds,
                         uri=str(original_uri),
-                        target_token=d.get(f"{key}_target_token"),
+                        target_token=d.get(ck(key, ckeys.TARGET_TOKEN)),
                     )
-                    d[f"{key}_saved_path"] = out_path
+                    d[ck(key, ckeys.SAVED_PATH)] = out_path
+                except SeriesSaveError:
+                    raise
                 except Exception as e:
                     raise SeriesSaveError(
                         f"Unexpected error saving multi-frame series: {e}",
@@ -487,17 +501,26 @@ class SaveDicomSeriesd(MapTransform, ThreadUnsafe):
                     ) from e
                 continue
 
-            scrubbed_list = d.get(f"{key}_scrubbed_datasets")
+            scrubbed_list = d.get(ck(key, ckeys.SCRUBBED_DATASETS))
             if scrubbed_list is None:
-                continue
+                if ck(key, ckeys.DICOM_DATASETS) in d:
+                    raise SeriesSaveError(
+                        "No scrubbed datasets in pipeline data for a loaded "
+                        "series — was ScrubDicomMetadatad run before "
+                        "SaveDicomSeriesd?",
+                        uri=str(meta.get("filename_or_obj", "")),
+                        transform="SaveDicomSeriesd",
+                    )
+                continue  # nothing loaded for this key
             original_uris = meta.get('slice_uris', [])
 
             try:
-                self.saver(
+                out_paths = self.saver(
                     datasets=scrubbed_list,
                     original_uris=original_uris,
-                    target_token=d.get(f"{key}_target_token"),
+                    target_token=d.get(ck(key, ckeys.TARGET_TOKEN)),
                 )
+                d[ck(key, ckeys.SAVED_PATHS)] = out_paths
             except SeriesSaveError:
                 raise
             except Exception as e:

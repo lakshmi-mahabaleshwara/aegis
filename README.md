@@ -248,6 +248,33 @@ python -m monai_aegis.dicom_runner --config monai_aegis/config/config.yaml
 | GCS     | `gs`     | `gcsfs`       |
 | Azure   | `az`     | `adlfs`       |
 
+### Offline / Air-Gapped Deployment
+
+The NER model is **pinned to an exact revision** in `config.yaml`
+(`ner.model_revision`), so the model cannot silently change under a
+deployment. Both model sources can be forced fully offline — no network
+calls at runtime, not even update checks.
+
+```bash
+# 1. On a connected machine (or Docker build stage): prefetch pinned weights
+python scripts/prefetch_models.py --config monai_aegis/config/config.yaml
+
+# 2. Run fully offline
+export AEGIS_HF_OFFLINE=true        # NER: resolve from local HF cache only
+export AEGIS_MODEL_DOWNLOADS=false  # EasyOCR: never attempt a download
+aegis-pipeline --config monai_aegis/config/config.yaml
+```
+
+| Env var | Config key | Effect |
+|---------|-----------|--------|
+| — | `ner.model_revision` | Exact NER model commit (pinned in config.yaml) |
+| `AEGIS_HF_OFFLINE` | `ner.local_files_only` | `true` → zero HuggingFace network calls |
+| `AEGIS_OCR_MODEL_DIR` | `ocr.model_storage_directory` | Pre-bundled EasyOCR weights dir |
+| `AEGIS_MODEL_DOWNLOADS` | `ocr.download_enabled` | `false` → EasyOCR never downloads |
+
+The Docker image bakes all weights in at build time and sets the offline
+flags, so containers run air-gapped by default.
+
 ### NER Classification Pipeline
 
 When `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline:
@@ -288,8 +315,8 @@ staging_output/dicom/<timestamp>/
 └── aegis_tag_actions.csv           # header tag scrubbing (ScrubDicomMetadatad)
 ```
 (Image runs write to `staging_output/image/<timestamp>/`. PNG/JPEG inputs have
-no DICOM header, so `aegis_tag_actions.csv` is header-only and SOP UID columns
-are blank.)
+no DICOM header, so image runs emit only `aegis_pixel_detections.csv` —
+`aegis_tag_actions.csv` is not created, and SOP UID columns are blank.)
 
 ### `aegis_pixel_detections.csv` — one row per OCR region
 | Column | Meaning |

@@ -40,9 +40,9 @@ class TestScrubDicomMetadatad(unittest.TestCase):
             'image_dicom_dataset': mock_ds
         }
 
-        # Mock the array transform's __call__ method
+        # Mock the array transform's scrub() method
         self.scrubber.transform = MagicMock()
-        self.scrubber.transform.return_value = mock_ds
+        self.scrubber.transform.scrub.return_value = (mock_ds, [])
 
         result = self.scrubber(data)
 
@@ -50,7 +50,7 @@ class TestScrubDicomMetadatad(unittest.TestCase):
         mock_dcmread.assert_not_called()
 
         # Verify the array transform was called
-        self.scrubber.transform.assert_called_once()
+        self.scrubber.transform.scrub.assert_called_once()
         # Verify scrubbed dataset is stored in dict (no file save)
         self.assertIn('image_scrubbed_ds', result)
 
@@ -84,14 +84,14 @@ class TestScrubDicomMetadatad(unittest.TestCase):
 
         # Mock the array transform to capture its arguments
         self.scrubber.transform = MagicMock()
-        self.scrubber.transform.return_value = mock_ds
+        self.scrubber.transform.scrub.return_value = (mock_ds, [])
 
         result = self.scrubber(data)
         
         mock_dcmread.assert_not_called()
 
         # Check that pixel_data passed was squeezed to (H, W)
-        call_kwargs = self.scrubber.transform.call_args[1]
+        call_kwargs = self.scrubber.transform.scrub.call_args[1]
         pixel_data = call_kwargs['pixel_data']
         self.assertEqual(pixel_data.ndim, 2)  # Should be (H, W)
 
@@ -112,12 +112,12 @@ class TestScrubDicomMetadatad(unittest.TestCase):
 
         # Mock the array transform
         self.scrubber.transform = MagicMock()
-        self.scrubber.transform.return_value = mock_ds
+        self.scrubber.transform.scrub.return_value = (mock_ds, [])
 
         result = self.scrubber(data)
 
         # Check that pixel_data was transposed to (H, W, 3)
-        call_kwargs = self.scrubber.transform.call_args[1]
+        call_kwargs = self.scrubber.transform.scrub.call_args[1]
         pixel_data = call_kwargs['pixel_data']
         self.assertEqual(pixel_data.shape, (10, 10, 3))
 
@@ -132,7 +132,7 @@ class TestScrubDicomMetadatad(unittest.TestCase):
         mock_ds.get.return_value = 4095
 
         self.scrubber.transform = MagicMock()
-        self.scrubber.transform.return_value = mock_ds
+        self.scrubber.transform.scrub.return_value = (mock_ds, [])
 
         with patch('monai_aegis.transforms.metadata.pydicom.dcmread', return_value=mock_ds):
             data = {
@@ -162,12 +162,12 @@ class TestScrubDicomMetadatad(unittest.TestCase):
         }
 
         self.scrubber.transform = MagicMock()
-        self.scrubber.transform.return_value = mock_ds
+        self.scrubber.transform.scrub.return_value = (mock_ds, [])
 
         result = self.scrubber(data)
 
-        self.scrubber.transform.assert_called_once()
-        pixel_data = self.scrubber.transform.call_args[1]['pixel_data']
+        self.scrubber.transform.scrub.assert_called_once()
+        pixel_data = self.scrubber.transform.scrub.call_args[1]['pixel_data']
         self.assertEqual(pixel_data.shape, (3, 10, 10))
         self.assertIn('image_scrubbed_ds', result)
 

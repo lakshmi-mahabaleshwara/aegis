@@ -102,3 +102,32 @@ def test_write_reports_creates_both_files(tmp_path):
     assert len(rows) == 1
     assert rows[0]["decision"] == "redacted"
     assert rows[0]["ocr_text"] == "hi"
+
+
+def test_write_reports_skips_tag_file_when_not_applicable(tmp_path):
+    # tag_rows=None → image-pipeline mode: no DICOM tags exist, so the
+    # tag-actions CSV must not be created at all.
+    paths = reporting.write_reports([], None, str(tmp_path))
+
+    assert len(paths) == 1
+    assert os.path.exists(os.path.join(str(tmp_path), reporting.PIXEL_DETECTIONS_FILE))
+    assert not os.path.exists(os.path.join(str(tmp_path), reporting.TAG_ACTIONS_FILE))
+
+
+def test_accumulator_image_mode_omits_tag_actions(tmp_path):
+    report = reporting.GroundTruthAccumulator(
+        {"reporting": {"save_ground_truth": True}}, include_tag_actions=False
+    )
+    report.collect({
+        "image_meta_dict": {"filename_or_obj": "/in/scan.png"},
+        "image_redaction_stats": {
+            "detections": [
+                {"bbox": [5, 5, 183, 15], "ocr_text": "Robinson, Brandy S.",
+                 "confidence": 0.97, "decision": "redacted"},
+            ],
+        },
+    })
+    report.flush(str(tmp_path))
+
+    assert os.path.exists(os.path.join(str(tmp_path), reporting.PIXEL_DETECTIONS_FILE))
+    assert not os.path.exists(os.path.join(str(tmp_path), reporting.TAG_ACTIONS_FILE))

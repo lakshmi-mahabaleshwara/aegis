@@ -30,6 +30,8 @@ from monai.utils.enums import TransformBackends
 from monai_aegis.transforms.exceptions import (
     DicomLoadError, ImageLoadError, DicomSaveError
 )
+from monai_aegis.transforms import context_keys as ckeys
+from monai_aegis.transforms.context_keys import ck
 
 __all__ = [
     "LoadDicomRaw", "LoadDicomRawd", "SaveDicom", "SaveDicomd",
@@ -192,8 +194,8 @@ class LoadDicomRawd(MapTransform):
                     ds = None  # Not a DICOM — fall through to image loading
 
                 if ds is not None:
-                    d[f"{key}_dicom_dataset"] = ds
-                    
+                    d[ck(key, ckeys.DICOM_DATASET)] = ds
+
                 from monai_aegis.transforms.utility import resolve_target_token
                 target_token = resolve_target_token(
                     uri=uri,
@@ -203,11 +205,17 @@ class LoadDicomRawd(MapTransform):
                 )
 
                 meta_tensor = self.transform(uri, dataset=ds, fs=self.fs)
+                if meta_tensor is None:
+                    raise DicomLoadError(
+                        "File is not a readable DICOM (no dataset could be parsed)",
+                        uri=uri,
+                        transform="LoadDicomRawd",
+                    )
                 d[key] = meta_tensor
-                d[f"{key}_target_token"] = target_token
+                d[ck(key, ckeys.TARGET_TOKEN)] = target_token
 
                 # Alias MetaTensor.meta → {key}_meta_dict for backward compatibility.
-                d[f"{key}_meta_dict"] = meta_tensor.meta
+                d[ck(key, ckeys.META_DICT)] = meta_tensor.meta
             except (DicomLoadError, ImageLoadError):
                 raise
             except Exception as e:
@@ -329,7 +337,10 @@ class SaveDicomd(MapTransform, ThreadUnsafe):
         """Save scrubbed DICOM datasets found in the data dict.
 
         Looks for ``{key}_scrubbed_ds`` entries written by
-        :py:class:`ScrubDicomMetadatad`. Non-DICOM keys are silently skipped.
+        :py:class:`ScrubDicomMetadatad`. Non-DICOM keys (no cached DICOM
+        dataset) are skipped; a DICOM item that was loaded but never
+        scrubbed raises — un-de-identified data must never be silently
+        dropped from the audit trail.
 
         Args:
             data: Pipeline data dictionary.
@@ -338,16 +349,24 @@ class SaveDicomd(MapTransform, ThreadUnsafe):
             The data dictionary (unmodified — saving is a side-effect).
 
         Raises:
-            DicomSaveError: If the output file cannot be written.
+            DicomSaveError: If the scrub stage did not run for a loaded
+                DICOM, or the output file cannot be written.
         """
         d = dict(data)
         for key in self.key_iterator(d):
-            scrubbed_ds = d.get(f"{key}_scrubbed_ds")
+            scrubbed_ds = d.get(ck(key, ckeys.SCRUBBED_DS))
             if scrubbed_ds is None:
-                continue
+                if ck(key, ckeys.DICOM_DATASET) in d or ck(key, ckeys.DICOM_DATASETS) in d:
+                    raise DicomSaveError(
+                        "No scrubbed dataset in pipeline data for a loaded DICOM "
+                        "— was ScrubDicomMetadatad run before SaveDicomd?",
+                        uri=str(d.get(ck(key, ckeys.META_DICT), {}).get('filename_or_obj', '')),
+                        transform="SaveDicomd",
+                    )
+                continue  # non-DICOM item — nothing for this saver to do
 
             # Get original uri for output filename
-            meta = d.get(f"{key}_meta_dict", {})
+            meta = d.get(ck(key, ckeys.META_DICT), {})
             fpath = meta.get('filename_or_obj')
             if isinstance(fpath, list):
                 fpath = fpath[0]
@@ -355,8 +374,8 @@ class SaveDicomd(MapTransform, ThreadUnsafe):
                 continue
 
             try:
-                out_path = self.saver(dataset=scrubbed_ds, uri=fpath, target_token=d.get(f"{key}_target_token"))
-                d[f"{key}_saved_path"] = out_path
+                out_path = self.saver(dataset=scrubbed_ds, uri=fpath, target_token=d.get(ck(key, ckeys.TARGET_TOKEN)))
+                d[ck(key, ckeys.SAVED_PATH)] = out_path
             except DicomSaveError:
                 raise
             except Exception as e:
@@ -494,8 +513,8 @@ class LoadImaged(MapTransform):
 
                 meta_tensor = self.transform(uri, fs=self.fs)
                 d[key] = meta_tensor
-                d[f"{key}_meta_dict"] = meta_tensor.meta
-                d[f"{key}_target_token"] = target_token
+                d[ck(key, ckeys.META_DICT)] = meta_tensor.meta
+                d[ck(key, ckeys.TARGET_TOKEN)] = target_token
             except ImageLoadError:
                 raise
             except Exception as e:
@@ -562,7 +581,7 @@ class SaveImage(Transform):
                 img_array = img_array.astype(np.uint8)
 
         # Build output path (use target_token if passed, replacing top-level directory)
-            from monai_aegis.transforms.utility import build_output_path
+        from monai_aegis.transforms.utility import build_output_path
         out_path = build_output_path(
             uri=uri,
             output_dir=self.output_dir,
@@ -633,14 +652,14 @@ class SaveImaged(MapTransform, ThreadUnsafe):
             if not isinstance(tensor, (MetaTensor, torch.Tensor)):
                 continue
 
-            meta = d.get(f"{key}_meta_dict", {})
+            meta = d.get(ck(key, ckeys.META_DICT), {})
             fpath = meta.get('filename_or_obj', '')
             if isinstance(fpath, list):
                 fpath = fpath[0]
             if not fpath:
                 continue
 
-            out_path = self.saver(tensor=tensor, uri=fpath, target_token=d.get(f"{key}_target_token"))
-            d[f"{key}_saved_path"] = out_path
+            out_path = self.saver(tensor=tensor, uri=fpath, target_token=d.get(ck(key, ckeys.TARGET_TOKEN)))
+            d[ck(key, ckeys.SAVED_PATH)] = out_path
 
         return d

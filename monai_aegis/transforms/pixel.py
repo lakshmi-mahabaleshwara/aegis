@@ -24,6 +24,8 @@ from monai.data import MetaTensor
 from monai.utils.enums import TransformBackends
 
 from monai_aegis.transforms.exceptions import PixelRedactionError
+from monai_aegis.transforms import context_keys as ckeys
+from monai_aegis.transforms.context_keys import ck
 
 __all__ = [
     "detect_text", "apply_redaction",
@@ -399,11 +401,20 @@ class RedactPixelPHI(Transform):
 
     @property
     def reader(self) -> easyocr.Reader:
-        """Lazily create a per-thread EasyOCR reader."""
+        """Lazily create a per-thread EasyOCR reader.
+
+        ``ocr.model_storage_directory`` points EasyOCR at a pre-bundled
+        weights directory, and ``ocr.download_enabled: false`` guarantees
+        no network access — together they support air-gapped deployment.
+        """
         if not hasattr(self._thread_local, 'reader'):
+            from monai_aegis.config.config_loader import as_bool
+            ocr_cfg = self.config['ocr']
             self._thread_local.reader = easyocr.Reader(
-                self.config['ocr'].get('languages', ['en']),
-                gpu=self.config['ocr'].get('gpu_usage', False)
+                ocr_cfg.get('languages', ['en']),
+                gpu=ocr_cfg.get('gpu_usage', False),
+                model_storage_directory=ocr_cfg.get('model_storage_directory') or None,
+                download_enabled=as_bool(ocr_cfg.get('download_enabled'), default=True),
             )
         return self._thread_local.reader
 
@@ -426,9 +437,9 @@ class RedactPixelPHI(Transform):
     def __call__(self, image: np.ndarray) -> np.ndarray:
         """Detect and redact burned-in PHI text.
 
-        Handles both 2D images ``(C, H, W)`` and 3D volumes
-        ``(C, D, H, W)``.  For volumes, keyframe-based OCR is used
-        to avoid running OCR on every slice.
+        Standard MONAI array-transform contract: array in, array out.
+        Callers that need the detection/redaction audit record should use
+        :meth:`redact` instead, which returns ``(redacted, stats)``.
 
         Args:
             image: Image array in channel-first format.
@@ -438,25 +449,33 @@ class RedactPixelPHI(Transform):
         Returns:
             Redacted array in the same format and dtype as input.
         """
+        redacted, _ = self.redact(image)
+        return redacted
+
+    def redact(self, image: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Detect and redact burned-in PHI text, returning the audit record.
+
+        Handles both 2D images ``(C, H, W)`` and 3D volumes
+        ``(C, D, H, W)``.  For volumes, keyframe-based OCR is used
+        to avoid running OCR on every slice.
+
+        Stateless with respect to the transform instance — results flow
+        back as return values, never through instance attributes, so a
+        single instance is safe to share across threads.
+
+        Args:
+            image: Image array in channel-first format.
+
+        Returns:
+            Tuple of ``(redacted, stats)`` where ``stats`` is the
+            detection/redaction audit dict for this call.
+        """
         if image.ndim == 4:
             return self._redact_volume(image)
         return self._redact_single(image)
 
-    def _ocr_single_frame(self, frame: np.ndarray) -> np.ndarray:
-        """Run OCR on a single ``(C, H, W)`` frame; return ``bool (H, W)`` PHI mask.
-
-        Used by :func:`build_union_mask` as the ``ocr_fn`` callback.
-        Side-effect: updates ``self.last_stats`` and appends to
-        ``self._vol_stats_acc`` (if set by the calling ``_redact_volume``).
-        """
-        redacted = self._redact_single(frame)
-        mask = np.any(frame != redacted, axis=0)
-        if getattr(self, '_vol_stats_acc', None) is not None:
-            self._vol_stats_acc.append(self.last_stats.copy())
-        return mask
-
-    def _redact_single(self, image: np.ndarray) -> np.ndarray:
-        """Redact PHI from a single 2D image ``(C, H, W)``."""
+    def _redact_single(self, image: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Redact PHI from a single 2D image ``(C, H, W)``; return ``(redacted, stats)``."""
         orig_dtype = image.dtype
         pixel_array = image.copy()
 
@@ -480,7 +499,7 @@ class RedactPixelPHI(Transform):
             norm_ocr = pixel_array
 
         # Detect and Redact (with NER if enabled)
-        bboxes, self.last_stats = detect_text(
+        bboxes, stats = detect_text(
             norm_ocr, self.reader, self.config, self.ner_classifier
         )
         redacted = apply_redaction(pixel_array, bboxes)
@@ -491,9 +510,9 @@ class RedactPixelPHI(Transform):
         elif is_rgb:
             redacted = np.transpose(redacted, (2, 0, 1))
 
-        return redacted.astype(orig_dtype)
+        return redacted.astype(orig_dtype), stats
 
-    def _redact_volume(self, volume: np.ndarray) -> np.ndarray:
+    def _redact_volume(self, volume: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Redact PHI from a 3D volume ``(C, D, H, W)`` using adaptive keyframe sampling.
 
         Samples an adaptive percentage of frames (10%, floor=3, ceiling=25),
@@ -506,7 +525,8 @@ class RedactPixelPHI(Transform):
             volume: Volume array ``(C, D, H, W)``.
 
         Returns:
-            Redacted copy of the volume in the same shape and dtype.
+            Tuple of ``(redacted_volume, stats)`` — same shape and dtype
+            as the input, plus the aggregated audit record.
         """
         orig_dtype = volume.dtype
         C, D, H, W = volume.shape
@@ -519,8 +539,15 @@ class RedactPixelPHI(Transform):
         floor      = sampling.get('floor', legacy_floor)
         ceiling    = sampling.get('ceiling', 25)
 
-        # Accumulate per-keyframe OCR stats via _ocr_single_frame side-channel
-        self._vol_stats_acc: List[Dict[str, Any]] = []
+        # Per-keyframe OCR stats accumulate into a local list via closure —
+        # locals are per-call, so concurrent redact() calls cannot interleave.
+        per_keyframe_stats: List[Dict[str, Any]] = []
+
+        def ocr_fn(frame: np.ndarray) -> np.ndarray:
+            """OCR one ``(C, H, W)`` keyframe → ``bool (H, W)`` PHI mask."""
+            redacted_frame, frame_stats = self._redact_single(frame)
+            per_keyframe_stats.append(frame_stats)
+            return np.any(frame != redacted_frame, axis=0)
 
         # redact_volume_safe uses (T, C, H, W) convention.
         # Transpose (C, D, H, W) → (D, C, H, W) as a view so in-place
@@ -530,16 +557,13 @@ class RedactPixelPHI(Transform):
 
         _, union_mask, kf_stats = redact_volume_safe(
             vol_DCHW,
-            self._ocr_single_frame,
+            ocr_fn,
             sample_pct=sample_pct,
             floor=floor,
             ceiling=ceiling,
         )
 
-        # Aggregate OCR stats collected across all keyframe calls
-        acc = self._vol_stats_acc
-        self._vol_stats_acc = None   # reset
-
+        acc = per_keyframe_stats
         phi_pixels = int(union_mask.sum())
 
         # Flatten per-keyframe detections, stamping each with the frame index
@@ -552,7 +576,7 @@ class RedactPixelPHI(Transform):
                 det['frame_index'] = int(frame_idx)
                 volume_detections.append(det)
 
-        self.last_stats = {
+        stats = {
             'total_detections':    sum(s.get('total_detections', 0) for s in acc),
             'low_confidence_count': sum(s.get('low_confidence_count', 0) for s in acc),
             'safelisted_count':    sum(s.get('safelisted_count', 0) for s in acc),
@@ -573,7 +597,7 @@ class RedactPixelPHI(Transform):
             phi_pixels,
         )
 
-        return result.astype(orig_dtype)
+        return result.astype(orig_dtype), stats
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +656,7 @@ class RedactPixelPHId(MapTransform):
         d = dict(data)
         for key in self.key_iterator(d):
             # Extract uri for error context
-            meta = d.get(f"{key}_meta_dict", {})
+            meta = d.get(ck(key, ckeys.META_DICT), {})
             uri = meta.get('filename_or_obj', '<unknown>')
             if isinstance(uri, list):
                 uri = uri[0]
@@ -656,7 +680,7 @@ class RedactPixelPHId(MapTransform):
                     pixel_array = np.array(input_tensor)
 
                 # --- US Region Mask: scope OCR to PHI zones only ---
-                us_phi_mask = d.get(f"{key}_us_phi_mask")
+                us_phi_mask = d.get(ck(key, ckeys.US_PHI_MASK))
                 if us_phi_mask is not None:
                     # Mask the diagnostic region before OCR so EasyOCR
                     # only processes the annotation/overlay areas.
@@ -675,8 +699,9 @@ class RedactPixelPHId(MapTransform):
                         int(100 * us_phi_mask.sum() / us_phi_mask.size),
                     )
 
-                # Apply array transform (OCR + redaction)
-                redacted = self.transform(pixel_array)
+                # Apply array transform (OCR + redaction); stats returned
+                # as a value — never read from instance state.
+                redacted, stats = self.transform.redact(pixel_array)
 
                 # --- Restore diagnostic region pixels after OCR ---
                 if us_phi_mask is not None:
@@ -686,10 +711,9 @@ class RedactPixelPHId(MapTransform):
                         redacted[:, :, ~us_phi_mask] = original_pixels[:, :, ~us_phi_mask]
 
                 # Store redaction stats for downstream routing
-                stats = getattr(self.transform, 'last_stats', {})
                 if us_phi_mask is not None:
                     stats['us_region_mask_applied'] = True
-                d[f"{key}_redaction_stats"] = stats
+                d[ck(key, ckeys.REDACTION_STATS)] = stats
 
                 # Generate binary redaction mask matched to spatial_shape
                 # Recompute mask from the difference between original and redacted
@@ -699,7 +723,7 @@ class RedactPixelPHId(MapTransform):
                 else:
                     diff = compare_src != redacted
                 redaction_mask = diff.astype(np.uint8)
-                d[f"{key}_redaction_mask"] = redaction_mask
+                d[ck(key, ckeys.REDACTION_MASK)] = redaction_mask
 
                 # Preserve MetaTensor
                 if isinstance(input_tensor, MetaTensor):

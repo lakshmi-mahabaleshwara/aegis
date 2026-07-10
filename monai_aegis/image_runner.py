@@ -16,6 +16,8 @@ from monai.data import DataLoader, Dataset
 from monai_aegis import reporting
 from monai_aegis.config.config_loader import load_config
 from monai_aegis.config.storage import AegisFileSystem
+from monai_aegis.transforms import context_keys as ckeys
+from monai_aegis.transforms.context_keys import ck
 from monai_aegis.transforms.discovery import discover_images
 from monai_aegis.transforms.pipeline import build_image_pipeline, build_image_series_pipeline
 
@@ -155,7 +157,7 @@ def _quarantine_many(files: Iterable[str], paths: RunnerPaths, reason: str) -> N
 
 
 def _cleanup_output(data_dict: dict[str, Any], paths: RunnerPaths, rel_path: str) -> None:
-    out_path = data_dict.get("image_saved_path")
+    out_path = data_dict.get(ck("image", ckeys.SAVED_PATH))
     if not out_path:
         filename = os.path.basename(rel_path)
         out_path = os.path.join(paths.output_dir, filename.rsplit(".", 1)[0] + ".png")
@@ -187,7 +189,7 @@ def _handle_single_result(
     if file_path == "unknown":
         return
     rel_path = _resolve_rel_path(data_dict, paths, file_path)
-    stats_dict = data_dict.get("image_redaction_stats", {})
+    stats_dict = data_dict.get(ck("image", ckeys.REDACTION_STATS), {})
     low_conf = stats_dict.get("low_confidence_count", 0)
 
     if low_conf > 0:
@@ -244,7 +246,8 @@ def run_single(config_path: str) -> None:
     )
 
     summary = RunSummary()
-    report = reporting.GroundTruthAccumulator(config)
+    # JPEG/PNG inputs have no DICOM tags — skip the tag-actions CSV.
+    report = reporting.GroundTruthAccumulator(config, include_tag_actions=False)
     data_list = []
     for file_path in image_files:
         rel_path = os.path.relpath(file_path, paths.input_dir)
@@ -329,7 +332,8 @@ def run_series(config_path: str) -> None:
             series_data.append({"image": folder_images, "label": label, "num_slices": len(folder_images)})
 
     summary = RunSummary()
-    report = reporting.GroundTruthAccumulator(config)
+    # JPEG/PNG inputs have no DICOM tags — skip the tag-actions CSV.
+    report = reporting.GroundTruthAccumulator(config, include_tag_actions=False)
 
     if singletons_data:
         for data_dict in _run_dataloader(
@@ -353,7 +357,7 @@ def run_series(config_path: str) -> None:
             if _handle_error_result(data_dict, paths, summary, f"NOT PROCESSED (ERROR): Series {label}"):
                 continue
 
-            stats_dict = data_dict.get("image_redaction_stats", {})
+            stats_dict = data_dict.get(ck("image", ckeys.REDACTION_STATS), {})
             strategy = stats_dict.get("volume_strategy", "unknown")
             num_slices = data_dict.get("num_slices", 0)
 
@@ -400,3 +404,7 @@ def main() -> None:
 
 
 __all__ = ["main", "run_series", "run_single"]
+
+
+if __name__ == "__main__":
+    main()

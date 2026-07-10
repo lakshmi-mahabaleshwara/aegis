@@ -50,17 +50,17 @@ class TestVolumeRedaction(unittest.TestCase):
         self.assertEqual(result.shape, (1, 64, 64))
 
     def test_volume_stats_contain_strategy(self):
-        """Test that last_stats contains volume-specific fields."""
+        """Test that redact() returns stats with volume-specific fields."""
         config = self._make_config()
         transform = RedactPixelPHI(config=config)
 
         volume = np.zeros((1, 3, 32, 32), dtype=np.float32)
-        transform(volume)
+        _, stats = transform.redact(volume)
 
-        self.assertIn('volume_strategy', transform.last_stats)
-        self.assertIn('num_slices', transform.last_stats)
-        self.assertIn('keyframe_indices', transform.last_stats)
-        self.assertEqual(transform.last_stats['num_slices'], 3)
+        self.assertIn('volume_strategy', stats)
+        self.assertIn('num_slices', stats)
+        self.assertIn('keyframe_indices', stats)
+        self.assertEqual(stats['num_slices'], 3)
 
     def test_small_volume_all_slices_as_keyframes(self):
         """If D <= keyframe_count, all slices should be keyframes."""
@@ -69,10 +69,20 @@ class TestVolumeRedaction(unittest.TestCase):
         transform = RedactPixelPHI(config=config)
 
         volume = np.zeros((1, 2, 32, 32), dtype=np.float32)
-        transform(volume)
+        _, stats = transform.redact(volume)
 
         # With 2 slices and keyframe_count=5, all 2 slices are keyframes
-        self.assertEqual(transform.last_stats['keyframe_indices'], [0, 1])
+        self.assertEqual(stats['keyframe_indices'], [0, 1])
+
+    def test_no_audit_state_left_on_instance(self):
+        """Audit results must flow as return values, never instance state."""
+        config = self._make_config()
+        transform = RedactPixelPHI(config=config)
+
+        transform.redact(np.zeros((1, 2, 32, 32), dtype=np.float32))
+
+        self.assertFalse(hasattr(transform, 'last_stats'))
+        self.assertFalse(hasattr(transform, '_vol_stats_acc'))
 
 
 class TestSelectKeyframeIndices(unittest.TestCase):

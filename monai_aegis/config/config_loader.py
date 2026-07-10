@@ -40,12 +40,34 @@ from typing import Any, Dict, Optional
 
 import yaml
 
-__all__ = ["load_config", "resolve_env_vars", "deep_merge", "get_keyframe_sampling"]
+__all__ = ["load_config", "resolve_env_vars", "deep_merge", "get_keyframe_sampling", "as_bool"]
 
 logger = logging.getLogger(__name__)
 
 # Matches ${VAR} or ${VAR:default_value}
 _ENV_PATTERN = re.compile(r'\$\{([^}:]+)(?::([^}]*))?\}')
+
+
+def as_bool(value: Any, default: bool = False) -> bool:
+    """Coerce a config value to bool.
+
+    Values that pass through ``${VAR:default}`` interpolation arrive as
+    strings, so ``'false'`` must not be truthy. Accepts real booleans,
+    ``'true'/'false'``, ``'1'/'0'``, ``'yes'/'no'`` (case-insensitive);
+    ``None``/empty string fall back to *default*.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    if text in ('true', '1', 'yes', 'on'):
+        return True
+    if text in ('false', '0', 'no', 'off'):
+        return False
+    raise ValueError(f"Cannot interpret config value as boolean: {value!r}")
 
 
 def get_keyframe_sampling(config: dict) -> dict:
