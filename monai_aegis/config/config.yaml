@@ -17,6 +17,19 @@ reporting:
   # When false, no CSVs are written — consume the per-file
   # records from the pipeline data dict and store them in your own database.
   save_ground_truth: true
+  # aegis_pixel_detections.csv is PHI-free by default: detected text is
+  # written as a salted token (text_token, same salt as header DUMMY
+  # tokens) plus its length — never verbatim. To validate against ground
+  # truth, tokenize the ground-truth strings with the same salt and join
+  # on the token.
+  #
+  # include_phi_text: true ADDITIONALLY writes
+  # aegis_pixel_detections_PHI.csv with the verbatim OCR text — raw PHI,
+  # for validation only. It is only ever written to phi_report_dir, which
+  # must be set and must differ from the run output directory, so the
+  # de-identified output tree stays shippable as-is.
+  include_phi_text: '${AEGIS_INCLUDE_PHI_TEXT:false}'
+  phi_report_dir: '${AEGIS_PHI_REPORT_DIR:}'
 
 storage:
   protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file, s3, gs, az, memory

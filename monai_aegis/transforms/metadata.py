@@ -2,7 +2,10 @@
 MONAI Aegis Metadata Transforms — ScrubDicomMetadata / ScrubDicomMetadatad
 
 DICOM metadata de-identification with configurable PII actions
-(REMOVE, ZERO, DUMMY) and pixel data injection.
+(REMOVE, ZERO, DUMMY, KEEP) and pixel data injection. Every output
+dataset is stamped with the PS3.15 de-identification attestation
+attributes (PatientIdentityRemoved, DeidentificationMethod[CodeSequence],
+BurnedInAnnotation).
 
 Thread-safe: no file I/O in ``__call__()`` — saving is handled by
 :py:class:`SaveDicomd`.
@@ -25,6 +28,7 @@ from monai.transforms import Transform, MapTransform
 from monai.data import MetaTensor
 from monai.utils.enums import TransformBackends
 
+from monai_aegis import __version__ as _AEGIS_VERSION
 from monai_aegis.transforms.utility import AegisIdentityManager
 from monai_aegis.transforms.exceptions import MetadataScrubError
 from monai_aegis.transforms import context_keys as ckeys
@@ -43,8 +47,9 @@ class ScrubDicomMetadata(Transform):
     """
     Array transform: Scrub PII from a DICOM dataset and inject redacted pixels.
 
-    Applies configurable PII actions (REMOVE, ZERO, DUMMY) to DICOM tags,
-    removes private tags, and injects redacted pixel data with correct bit-depth.
+    Applies configurable PII actions (REMOVE, ZERO, DUMMY, KEEP) to DICOM
+    tags, removes private tags, injects redacted pixel data with correct
+    bit-depth, and stamps the PS3.15 attestation attributes on the output.
 
     This transform is **pure** — it operates in-memory and does NOT write to disk.
     Use :py:class:`SaveDicom` / :py:class:`SaveDicomd` for persistence.
@@ -134,18 +139,40 @@ class ScrubDicomMetadata(Transform):
             ScrubDicomMetadata._parse_hex_part(parts[1]),
         )
 
+    # The complete action vocabulary (KEEP = deliberate retention, audited
+    # with redacted=False). Validated at construction time — a typo'd
+    # action must fail the run before any file is touched, never silently
+    # leave PHI in place at scrub time.
+    _VALID_ACTIONS = frozenset({'REMOVE', 'ZERO', 'DUMMY', 'KEEP'})
+
     @staticmethod
     def _build_pii_actions(pii_mapping: Dict[str, Any]) -> Dict[pydicom.tag.BaseTag, str]:
-        """Parse configured tag actions once so recursive scrubbing can reuse them."""
+        """Parse configured tag actions once so recursive scrubbing can reuse them.
+
+        Raises:
+            ValueError: If a tag key cannot be parsed or an action is not
+                one of REMOVE / ZERO / DUMMY. Misconfiguration fails the
+                pipeline at construction rather than silently skipping the
+                rule (which would pass PHI through unscrubbed).
+        """
         actions: Dict[pydicom.tag.BaseTag, str] = {}
         for tag_str, action in pii_mapping.items():
             try:
                 group, element = ScrubDicomMetadata._parse_tag_key(tag_str)
                 tag = pydicom.tag.Tag(group, element)
             except Exception as e:
-                logger.error("Error parsing tag %s: %s", tag_str, e)
-                continue
-            actions[tag] = str(action).upper()
+                raise ValueError(
+                    f"Invalid DICOM tag {tag_str!r} in pii_mapping: {e}"
+                ) from e
+            action_upper = str(action).upper()
+            if action_upper not in ScrubDicomMetadata._VALID_ACTIONS:
+                raise ValueError(
+                    f"Unknown pii_mapping action {action!r} for tag {tag_str} — "
+                    f"valid actions: {sorted(ScrubDicomMetadata._VALID_ACTIONS)}. "
+                    "Refusing to run: a mistyped action would leave this tag's "
+                    "PHI in place while the audit reported it as redacted."
+                )
+            actions[tag] = action_upper
         return actions
 
     def _apply_action(
@@ -172,14 +199,81 @@ class ScrubDicomMetadata(Transform):
         elif action == 'DUMMY':
             token = self.identity_manager.get_token(str(ds[tag].value))
             ds[tag].value = token
-        # Record the applied action for ground-truth reporting. All three
-        # configured actions de-identify the element, so redacted=True.
+        elif action == 'KEEP':
+            pass  # deliberate retention — value untouched, recorded below
+        else:
+            # Unreachable when actions come from _build_pii_actions (which
+            # validates), but guards any future caller: an unknown action
+            # must never fall through and record a redaction that did not
+            # happen.
+            raise MetadataScrubError(
+                f"Unhandled pii_mapping action {action!r} for tag {tag}",
+                transform="ScrubDicomMetadata",
+            )
+        # Record the applied action for ground-truth reporting. REMOVE /
+        # ZERO / DUMMY de-identify the element; KEEP retains it by design.
         tag_actions.append({
             'tag': '({:04X},{:04X})'.format(tag.group, tag.element),
             'keyword': keyword,
             'action': action,
-            'redacted': True,
+            'redacted': action != 'KEEP',
         })
+
+    def _stamp_attestation(
+        self,
+        ds: pydicom.Dataset,
+        pixel_redacted: bool,
+        tag_actions: list,
+    ) -> None:
+        """Stamp the PS3.15 de-identification attestation attributes.
+
+        Writes the machine-checkable "this object was de-identified"
+        markers that receivers (archives, PACS, downstream de-id audits)
+        key on:
+
+          - (0012,0062) PatientIdentityRemoved = YES
+          - (0012,0063) DeidentificationMethod (multi-valued LO)
+          - (0012,0064) DeidentificationMethodCodeSequence — DCM 113100
+            (Basic Application Confidentiality Profile), plus DCM 113101
+            (Clean Pixel Data Option) when pixel redaction ran
+          - (0028,0301) BurnedInAnnotation = NO — only when pixel
+            redaction actually ran on this instance
+
+        Called after the scrub pass so the configured tag actions can
+        never strip the attestation itself.
+        """
+        ds.PatientIdentityRemoved = 'YES'
+        # Multi-valued LO: each value must stay within the 64-char VR limit.
+        method = [f'MONAI Aegis {_AEGIS_VERSION}', 'PS3.15 header scrub']
+        codes = [('113100', 'Basic Application Confidentiality Profile')]
+        if pixel_redacted:
+            method.append('Pixel PHI redaction (OCR/NER)')
+            codes.append(('113101', 'Clean Pixel Data Option'))
+        ds.DeidentificationMethod = method
+        seq = []
+        for value, meaning in codes:
+            item = pydicom.Dataset()
+            item.CodeValue = value
+            item.CodingSchemeDesignator = 'DCM'
+            item.CodeMeaning = meaning
+            seq.append(item)
+        ds.DeidentificationMethodCodeSequence = seq
+
+        stamped = [
+            ('(0012,0062)', 'PatientIdentityRemoved'),
+            ('(0012,0063)', 'DeidentificationMethod'),
+            ('(0012,0064)', 'DeidentificationMethodCodeSequence'),
+        ]
+        if pixel_redacted:
+            ds.BurnedInAnnotation = 'NO'
+            stamped.append(('(0028,0301)', 'BurnedInAnnotation'))
+        for tag, keyword in stamped:
+            tag_actions.append({
+                'tag': tag,
+                'keyword': keyword,
+                'action': 'ATTEST',
+                'redacted': False,
+            })
 
     def _scrub_dataset_recursive(self, ds: pydicom.Dataset, tag_actions: list) -> None:
         """Apply configured actions to this dataset and every nested sequence item."""
@@ -236,7 +330,9 @@ class ScrubDicomMetadata(Transform):
         Returns:
             Tuple of ``(scrubbed_dataset, tag_actions)`` where
             ``tag_actions`` is a list of per-tag audit dicts
-            (``{'tag', 'keyword', 'action', 'redacted'}``).
+            (``{'tag', 'keyword', 'action', 'redacted'}``). Includes
+            ``action='ATTEST'`` rows (``redacted=False``) for the PS3.15
+            attestation attributes stamped on the output.
 
         Raises:
             MetadataScrubError: If tag parsing or pixel injection fails
@@ -305,6 +401,11 @@ class ScrubDicomMetadata(Transform):
             p_min, p_max = float(contiguous_pixels.min()), float(contiguous_pixels.max())
             ds.WindowCenter = str((p_max + p_min) / 2)
             ds.WindowWidth = str(p_max - p_min)
+
+        # 3. De-identification attestation (PS3.15) — stamped last so the
+        #    scrub pass can never remove the attestation attributes.
+        self._stamp_attestation(ds, pixel_redacted=pixel_data is not None,
+                                tag_actions=tag_actions)
 
         return ds, tag_actions
 

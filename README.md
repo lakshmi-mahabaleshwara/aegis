@@ -17,7 +17,7 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 ## 🌟 Features
 
 ### DICOM De-identification
-- **PS3.15 Basic Application Level Confidentiality Profile** — metadata scrubbing follows the DICOM standard with REMOVE / DUMMY / ZERO actions, configurable via `pii_mapping` in `config.yaml`
+- **PS3.15 Basic Application Level Confidentiality Profile** — metadata scrubbing follows the DICOM standard with REMOVE / DUMMY / ZERO / KEEP actions, configurable via `pii_mapping` in `config.yaml`; a mistyped tag or action fails the run at startup instead of silently passing PHI through
 - **Recursive sequence scrubbing** — PII actions are applied to nested DICOM sequences (not just top-level tags)
 - **Deterministic tokenization** — patient metadata (PatientName, PatientID) is replaced with reproducible hash tokens via `AegisIdentityManager`, enabling re-linkage when the original salt is available
 - **Private tag removal** — all vendor-private tags are stripped for enhanced privacy
@@ -42,8 +42,9 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 
 ### Ground-Truth Reporting & Validation
 - **Per-run "ground truth" CSVs** — when `reporting.save_ground_truth: true` (the default), each run records exactly what Aegis detected and redacted, so you can validate output against a known answer key
-- **`aegis_pixel_detections.csv`** — one row per OCR region: original/de-identified `SOPInstanceUID`, bounding box (`x, y, w, h`), frame index, OCR text, confidence, and decision (`redacted` / `safelisted` / `low_confidence`)
-- **`aegis_tag_actions.csv`** — one row per scrubbed DICOM header tag: tag, keyword, action (`REMOVE` / `DUMMY` / `ZERO`), and the original/de-identified `SOPInstanceUID`
+- **`aegis_pixel_detections.csv`** — one row per OCR region: original/de-identified `SOPInstanceUID`, bounding box (`x, y, w, h`), frame index, tokenized text (`text_token` + `text_len` — PHI-free by default; verbatim text is opt-in via `reporting.include_phi_text` and written only outside the output dir), confidence, and decision (`redacted` / `safelisted` / `low_confidence`)
+- **`aegis_tag_actions.csv`** — one row per scrubbed DICOM header tag: tag, keyword, action (`REMOVE` / `DUMMY` / `ZERO` / `KEEP` / `ATTEST`), and the original/de-identified `SOPInstanceUID`
+- **PS3.15 attestation stamps** — every scrubbed DICOM carries `PatientIdentityRemoved=YES`, `DeidentificationMethod(CodeSequence)` (DCM 113100/113101), and `BurnedInAnnotation=NO` after pixel cleaning, so receivers can verify de-identification from the object itself
 - **Stable join key** — the *original* `SOPInstanceUID` is preserved in both files (even though Aegis regenerates it on output), so reports join directly to external ground truth that keys on the source UID
 - **Bring-your-own-database mode** — set `reporting.save_ground_truth: false` to skip CSV writing and instead pull the same per-file records straight from the pipeline data dict via `monai_aegis.reporting.extract_records(...)`
 
@@ -64,6 +65,13 @@ options enabled:
 - **Clean Pixel Data Option** — OCR + NER-based burnt-in PHI removal
 - **Retain Longitudinal Temporal Information with Modified Dates Option**
   (dates zeroed, not removed, to preserve relative temporal relationships)
+
+Every output object is stamped with the PS3.15 **de-identification
+attestation attributes** — `PatientIdentityRemoved=YES` (0012,0062),
+`DeidentificationMethod` (0012,0063), `DeidentificationMethodCodeSequence`
+(0012,0064) with the profile codes above (DCM 113100, 113101), and
+`BurnedInAnnotation=NO` (0028,0301) after pixel cleaning — so receivers
+can machine-verify de-identification from the object itself.
 
 All DICOM UIDs (StudyInstanceUID, SeriesInstanceUID, SOPInstanceUID) are
 replaced with deterministically generated tokens, enabling re-linkage when the original salt is available.
@@ -159,6 +167,10 @@ reporting:
   save_ground_truth: true   # true → write aegis_pixel_detections.csv + aegis_tag_actions.csv
                             #        to the run output directory
                             # false → no CSVs; read records from the data dict yourself
+  include_phi_text: '${AEGIS_INCLUDE_PHI_TEXT:false}'  # opt-in: ALSO write verbatim OCR text
+                            # (raw PHI) as aegis_pixel_detections_PHI.csv — validation only
+  phi_report_dir: '${AEGIS_PHI_REPORT_DIR:}'  # required when include_phi_text is true;
+                            # must differ from the run output directory
 
 storage:
   protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file, s3, gs, az
@@ -184,10 +196,15 @@ ocr:
   languages: ['en']
   gpu_usage: false
   confidence_threshold: 0.4
+  model_storage_directory: '${AEGIS_OCR_MODEL_DIR:}'      # pre-bundled EasyOCR weights dir
+  download_enabled: '${AEGIS_MODEL_DOWNLOADS:true}'       # false → never download at runtime
 
 ner:
   enabled: true                   # Set false to fall back to regex safelist
   model_name: 'StanfordAIMI/stanford-deidentifier-base'
+  model_revision: '661b9c1c717d3165512d440abc3700c386aefab6'  # exact model-repo commit —
+                                  # pinned so the model cannot silently change under a deployment
+  local_files_only: '${AEGIS_HF_OFFLINE:false}'  # true → resolve from local HF cache, zero network calls
   device: '${AEGIS_DEVICE:cpu}'   # 'cpu', 'cuda', or 'mps'
   phi_labels:                     # NER entity types treated as PHI
     - PATIENT
@@ -216,6 +233,8 @@ pii_mapping:
   '(0010, 0030)': 'REMOVE'  # PatientBirthDate → removed
   '(0008, 0020)': 'ZERO'    # StudyDate → 00000000
   '(0008, 0050)': 'REMOVE'  # AccessionNumber → removed
+  # Add any tag your deployment needs — actions apply recursively into
+  # nested sequences. Invalid tags or actions fail the run at startup.
 ```
 
 
@@ -292,6 +311,13 @@ When `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline
 | `DUMMY` | Replace with deterministic hash token | `John Doe` → `TOKEN_a1b2c3d4e5f6` |
 | `REMOVE` | Delete the DICOM tag entirely | Tag removed from dataset |
 | `ZERO` | Set to zero / empty value | `20250216` → `00000000` |
+| `KEEP` | Retain the value deliberately (audited with `redacted=False`) | Value unchanged, retention on record |
+
+Actions are validated when the pipeline is constructed — an unknown action
+(e.g. a `DELETE` typo) or malformed tag raises immediately, before any file
+is processed, rather than silently leaving that tag's PHI in place.
+(`ATTEST` rows in the tag report are stamps Aegis writes, not a
+configurable action.)
 
 ---
 
@@ -326,9 +352,22 @@ no DICOM header, so image runs emit only `aegis_pixel_detections.csv` —
 | `deid_sop_uid` | Regenerated SOPInstanceUID of the de-identified output |
 | `frame_index` | Frame the text was found on (blank for single-frame) |
 | `bbox_x, bbox_y, bbox_w, bbox_h` | Detection box (top-left + size) |
-| `ocr_text` | Text EasyOCR read |
+| `text_token` | Salted token of the OCR text (same salt as header `DUMMY` tokens) — **never the verbatim text** |
+| `text_len` | Character length of the detected text |
 | `confidence` | OCR confidence |
 | `decision` | `redacted`, `safelisted`, or `low_confidence` |
+
+**This file is PHI-free by design** — it lives inside the de-identified
+output, so the detected text appears only as a token. Same text → same
+token, so repeats stay correlatable, and validation works by tokenizing
+the ground-truth strings with the same salt and joining on equality.
+
+Need the verbatim text (e.g. manual review during validation)? Set
+`reporting.include_phi_text: true` **and** point `reporting.phi_report_dir`
+at a directory *outside* the run output — Aegis then additionally writes
+`aegis_pixel_detections_PHI.csv` (same columns, with `ocr_text` instead of
+the token) there, and refuses to run if the directory is unset or equal to
+the output directory. Handle that file as PHI.
 
 ### `aegis_tag_actions.csv` — one row per scrubbed header tag
 | Column | Meaning |
@@ -337,8 +376,16 @@ no DICOM header, so image runs emit only `aegis_pixel_detections.csv` —
 | `original_sop_uid` / `deid_sop_uid` | Source vs. output SOPInstanceUID |
 | `tag` | DICOM tag, e.g. `(0010,0010)` |
 | `keyword` | Tag keyword, e.g. `PatientName` |
-| `action` | `REMOVE` / `DUMMY` / `ZERO` |
-| `redacted` | `True` when the action de-identified the element |
+| `action` | `REMOVE` / `DUMMY` / `ZERO` / `KEEP` / `ATTEST` |
+| `redacted` | `True` when the action de-identified the element (`False` for `KEEP` retention and `ATTEST` stamps) |
+
+Every scrubbed DICOM is also stamped with the PS3.15 **de-identification
+attestation attributes** — `PatientIdentityRemoved=YES` (0012,0062),
+`DeidentificationMethod` (0012,0063), `DeidentificationMethodCodeSequence`
+(0012,0064) with DCM 113100 (+ 113101 when pixel redaction ran), and
+`BurnedInAnnotation=NO` after pixel cleaning — so receivers can verify
+de-identification from the object itself. These stamps appear in the tag
+report as `ATTEST` rows.
 
 ### Validating against external ground truth
 The *original* `SOPInstanceUID` is preserved in both reports (Aegis regenerates
@@ -376,6 +423,10 @@ python -m unittest discover tests/unit -v
 
 # Run integration tests
 python -m unittest discover tests/integration -v
+
+# The reporting tests are pytest-style and are not picked up by unittest —
+# run them (or the whole suite) with pytest:
+python -m pytest tests/ -q
 ```
 
 
@@ -397,6 +448,7 @@ aegis/
 │   │   └── storage.py                # AegisFileSystem (fsspec wrapper)
 │   └── transforms/
 │       ├── __init__.py                # Public API exports
+│       ├── context_keys.py            # Central registry of inter-transform data-dict keys
 │       ├── io.py                      # LoadDicomRaw/d, SaveDicom/d, LoadImage/d, SaveImage/d
 │       ├── series_io.py               # LoadDicomSeries/d, SaveDicomSeries/d
 │       ├── discovery.py               # discover_dicoms, is_dicom_file, group/validate/sort
@@ -419,6 +471,10 @@ aegis/
 │   │   ├── test_us_regions.py         # US region mask building + pipeline integration
 │   │   └── ...                        # Additional test files
 │   └── integration/                   # End-to-end tests
+├── scripts/
+│   ├── prefetch_models.py             # Download pinned model weights for offline/Docker builds
+│   ├── bench_aegis.py                 # Public-dataset benchmark runner
+│   └── prepare_pydicom_samples.py     # Benchmark dataset preparation
 ├── run_dicom_pipeline.py              # Compatibility wrapper for monai_aegis.dicom_runner
 ├── run_image_pipeline.py              # Compatibility wrapper for monai_aegis.image_runner
 ├── run_pipeline.py                    # Compatibility wrapper for monai_aegis.cli

@@ -88,7 +88,8 @@ def test_write_reports_creates_both_files(tmp_path):
     pixel_rows = [{
         "source_path": "/in/a.dcm", "original_sop_uid": "O", "deid_sop_uid": "D",
         "frame_index": "", "bbox_x": 1, "bbox_y": 2, "bbox_w": 3, "bbox_h": 4,
-        "ocr_text": "hi", "confidence": 0.5, "decision": "redacted",
+        "text_token": "TOKEN_abc", "text_len": 2,
+        "confidence": 0.5, "decision": "redacted",
     }]
     paths = reporting.write_reports(pixel_rows, [], str(tmp_path))
 
@@ -101,7 +102,8 @@ def test_write_reports_creates_both_files(tmp_path):
         rows = list(csv.DictReader(f))
     assert len(rows) == 1
     assert rows[0]["decision"] == "redacted"
-    assert rows[0]["ocr_text"] == "hi"
+    assert rows[0]["text_token"] == "TOKEN_abc"
+    assert "ocr_text" not in rows[0]
 
 
 def test_write_reports_skips_tag_file_when_not_applicable(tmp_path):
@@ -112,6 +114,94 @@ def test_write_reports_skips_tag_file_when_not_applicable(tmp_path):
     assert len(paths) == 1
     assert os.path.exists(os.path.join(str(tmp_path), reporting.PIXEL_DETECTIONS_FILE))
     assert not os.path.exists(os.path.join(str(tmp_path), reporting.TAG_ACTIONS_FILE))
+
+
+def test_sanitize_pixel_rows_tokenizes_text():
+    from monai_aegis.transforms.utility import AegisIdentityManager
+    tokenizer = AegisIdentityManager(salt="test-salt")
+    rows = [
+        {"ocr_text": "Robinson, Brandy S.", "decision": "redacted"},
+        {"ocr_text": "Robinson, Brandy S.", "decision": "redacted"},
+        {"ocr_text": "", "decision": "safelisted"},
+    ]
+
+    safe = reporting.sanitize_pixel_rows(rows, tokenizer)
+
+    assert all("ocr_text" not in r for r in safe)
+    assert safe[0]["text_token"].startswith("TOKEN_")
+    assert safe[0]["text_len"] == len("Robinson, Brandy S.")
+    # Same text → same token, so repeats remain correlatable without PHI.
+    assert safe[0]["text_token"] == safe[1]["text_token"]
+    assert safe[2]["text_token"] == ""
+    # And the join property: tokenizing the ground-truth side matches.
+    assert safe[0]["text_token"] == tokenizer.get_token("Robinson, Brandy S.")
+
+
+def _phi_config(**reporting_overrides):
+    rep = {"save_ground_truth": True}
+    rep.update(reporting_overrides)
+    return {"reporting": rep, "tokenization": {"salt": "test-salt"}}
+
+
+_DETECTION_DATA = {
+    "image_meta_dict": {"filename_or_obj": "/in/scan.dcm"},
+    "image_redaction_stats": {
+        "detections": [
+            {"bbox": [5, 5, 183, 15], "ocr_text": "Robinson, Brandy S.",
+             "confidence": 0.97, "decision": "redacted"},
+        ],
+    },
+}
+
+
+def test_accumulator_default_csv_is_phi_free(tmp_path):
+    report = reporting.GroundTruthAccumulator(_phi_config())
+    report.collect(_DETECTION_DATA)
+    report.flush(str(tmp_path))
+
+    with open(os.path.join(str(tmp_path), reporting.PIXEL_DETECTIONS_FILE), newline="") as f:
+        content = f.read()
+    assert "Robinson" not in content
+    rows = list(csv.DictReader(content.splitlines()))
+    assert rows[0]["text_token"].startswith("TOKEN_")
+    assert rows[0]["text_len"] == str(len("Robinson, Brandy S."))
+    assert not os.path.exists(
+        os.path.join(str(tmp_path), reporting.PIXEL_DETECTIONS_PHI_FILE))
+
+
+def test_accumulator_phi_text_requires_phi_dir():
+    import pytest
+    with pytest.raises(ValueError, match="phi_report_dir"):
+        reporting.GroundTruthAccumulator(_phi_config(include_phi_text=True))
+
+
+def test_accumulator_phi_dir_must_differ_from_output(tmp_path):
+    import pytest
+    report = reporting.GroundTruthAccumulator(
+        _phi_config(include_phi_text=True, phi_report_dir=str(tmp_path)))
+    report.collect(_DETECTION_DATA)
+    with pytest.raises(ValueError, match="must differ"):
+        report.flush(str(tmp_path))
+
+
+def test_accumulator_opt_in_writes_verbatim_phi_file(tmp_path):
+    out_dir = tmp_path / "deid_output"
+    phi_dir = tmp_path / "phi_quarantine"
+    report = reporting.GroundTruthAccumulator(
+        _phi_config(include_phi_text=True, phi_report_dir=str(phi_dir)))
+    report.collect(_DETECTION_DATA)
+    report.flush(str(out_dir))
+
+    # Default file in the output dir stays tokenized...
+    with open(os.path.join(str(out_dir), reporting.PIXEL_DETECTIONS_FILE)) as f:
+        assert "Robinson" not in f.read()
+    # ...while the verbatim report lands only in the quarantine dir.
+    phi_file = os.path.join(str(phi_dir), reporting.PIXEL_DETECTIONS_PHI_FILE)
+    with open(phi_file, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["ocr_text"] == "Robinson, Brandy S."
+    assert not os.path.exists(
+        os.path.join(str(out_dir), reporting.PIXEL_DETECTIONS_PHI_FILE))
 
 
 def test_accumulator_image_mode_omits_tag_actions(tmp_path):
