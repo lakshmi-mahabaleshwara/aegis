@@ -45,7 +45,7 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **`aegis_pixel_detections.csv`** — one row per OCR region: original/de-identified `SOPInstanceUID`, bounding box (`x, y, w, h`), frame index, tokenized text (`text_token` + `text_len` — PHI-free by default; verbatim text is opt-in via `reporting.include_phi_text` and written only outside the output dir), confidence, and decision (`redacted` / `safelisted` / `low_confidence`)
 - **`aegis_tag_actions.csv`** — one row per scrubbed DICOM header tag: tag, keyword, action (`REMOVE` / `DUMMY` / `ZERO` / `KEEP` / `ATTEST`), and the original/de-identified `SOPInstanceUID`
 - **PS3.15 attestation stamps** — every scrubbed DICOM carries `PatientIdentityRemoved=YES`, `DeidentificationMethod(CodeSequence)` (DCM 113100/113101), and `BurnedInAnnotation=NO` after pixel cleaning, so receivers can verify de-identification from the object itself
-- **Stable join key** — the *original* `SOPInstanceUID` is preserved in both files (even though Aegis regenerates it on output), so reports join directly to external ground truth that keys on the source UID
+- **Stable join key** — the *original* `SOPInstanceUID` is preserved in both files, so reports join directly to external ground truth that keys on the source UID
 - **Bring-your-own-database mode** — set `reporting.save_ground_truth: false` to skip CSV writing and instead pull the same per-file records straight from the pipeline data dict via `monai_aegis.reporting.extract_records(...)`
 
 ### Cloud Storage (fsspec)
@@ -571,7 +571,7 @@ Apache 2.0
 
 ## 🙏 Acknowledgments
 
-- [MONAI](https://docs.monai.io/) — Medical Open Network for AI
+- [MONAI](https://github.com/Project-MONAI) — Medical Open Network for AI
 - [StanfordAIMI](https://huggingface.co/StanfordAIMI/stanford-deidentifier-base) — Stanford De-identifier NER model
 - [EasyOCR](https://github.com/JaidedAI/EasyOCR) — OCR detection library
 - [HuggingFace Transformers](https://huggingface.co/docs/transformers/) — NER pipeline
