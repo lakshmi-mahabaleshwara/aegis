@@ -415,6 +415,70 @@ pixel_rows, tag_rows = reporting.extract_records(result)   # CSV-ready dict rows
 
 ---
 
+## 🤖 MCP Server (AI-Agent Interface)
+
+`aegis_mcp_server.py` exposes the pipeline as six [Model Context Protocol](https://modelcontextprotocol.io)
+tools so an orchestrating model — Claude Desktop, MCP Inspector, or a local
+Ollama model behind mcpo/Open WebUI — can run, monitor, and audit
+de-identification through natural language. **No PHI ever enters a model
+context window**: tool responses carry only file names, paths, counts,
+decision categories, tag keywords/actions, timings, and job states — never
+pixel data, OCR text, text tokens, or DICOM tag values.
+
+| Tool | Purpose |
+|------|---------|
+| `warm_up()` | Preload OCR + NER models (call first; seconds when cached) |
+| `deidentify_file(input_path, output_dir="")` | Synchronous single file (DICOM/JPEG/PNG) |
+| `start_batch_job(input_dir, output_dir="", mode="auto")` | Async directory-scale job; returns a `job_id` immediately. `mode`: `auto` (DICOM + images, default), `dicom`, or `image` — mirroring `run_pipeline.py --mode` |
+| `get_job_status(job_id)` | Poll batch progress (state, counts, errors) |
+| `summarize_run(run_dir, source_filename="")` | Audit a run from its ground-truth CSVs (or job summary JSON) |
+| `list_review_queue()` | Files quarantined for manual review (names only) |
+
+Batch jobs write per-job output to `staging_output/mcp/<job_id>/`, including
+the standard ground-truth CSVs and a PHI-free `job_summary_<job_id>.json`.
+Single-file calls default to a shared `staging_output/mcp/` directory where
+ground-truth rows **accumulate across calls**: re-running a file replaces
+only that file's rows, so `summarize_run` can audit the whole directory at
+any time.
+
+**Claude Desktop** (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "aegis": {
+      "command": "/path/to/aegis/venv/bin/python",
+      "args": ["/path/to/aegis/aegis_mcp_server.py"],
+      "env": { "AEGIS_ROOT": "/path/to/aegis", "AEGIS_DEVICE": "mps" }
+    }
+  }
+}
+```
+
+**MCP Inspector** (manual/debug testing):
+
+```bash
+npx @modelcontextprotocol/inspector venv/bin/python aegis_mcp_server.py
+```
+
+**Open WebUI + Ollama** (via the mcpo OpenAPI bridge):
+
+```bash
+uvx mcpo --port 8000 -- venv/bin/python aegis_mcp_server.py
+# Open WebUI → Settings → Tools → add http://localhost:8000
+# (use http://host.docker.internal:8000 when Open WebUI runs in Docker)
+# Use a tool-capable model, e.g. qwen2.5:7b
+```
+
+The server is stdio-only (mcpo provides HTTP bridging), logs exclusively to
+stderr, and keeps all models on a single dedicated pipeline thread so
+`warm_up` benefits every subsequent call. Server constants (paths, response
+limits, batch modes) live in `monai_aegis/config/mcp_server_config.py`.
+Environment: `AEGIS_ROOT` (defaults to the repo root) and `AEGIS_DEVICE`
+(`cpu`/`mps`/`cuda`, consumed by the NER config).
+
+---
+
 ## 🧪 Testing
 
 ```bash
@@ -445,6 +509,7 @@ aegis/
 │   ├── config/
 │   │   ├── config.yaml               # De-identification + NER + storage + series settings
 │   │   ├── config_loader.py          # Env var interpolation + overlay merging
+│   │   ├── mcp_server_config.py      # aegis-mcp paths, limits, and FastMCP instance
 │   │   └── storage.py                # AegisFileSystem (fsspec wrapper)
 │   └── transforms/
 │       ├── __init__.py                # Public API exports
@@ -469,6 +534,7 @@ aegis/
 │   │   ├── test_image_series_io.py    # Image series load/save + tokenization
 │   │   ├── test_volume_redaction.py   # Volume keyframe OCR
 │   │   ├── test_us_regions.py         # US region mask building + pipeline integration
+│   │   ├── test_mcp_server.py         # aegis-mcp tools, batch modes, PHI-free guard
 │   │   └── ...                        # Additional test files
 │   └── integration/                   # End-to-end tests
 ├── scripts/
@@ -478,6 +544,7 @@ aegis/
 ├── run_dicom_pipeline.py              # Compatibility wrapper for monai_aegis.dicom_runner
 ├── run_image_pipeline.py              # Compatibility wrapper for monai_aegis.image_runner
 ├── run_pipeline.py                    # Compatibility wrapper for monai_aegis.cli
+├── aegis_mcp_server.py                # MCP server exposing the pipeline to AI agents
 ├── aegis_demo.ipynb                   # Interactive walkthrough notebook
 ├── Dockerfile                         # Container build
 ├── staging_input/                     # Input files (not tracked)
