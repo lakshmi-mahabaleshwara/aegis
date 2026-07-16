@@ -4,3 +4,4 @@ easyocr
 pillow
 pyyaml
 transformers
+mcp[cli]
