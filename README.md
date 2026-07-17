@@ -26,7 +26,9 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 ### Pixel Redaction
 - **Stanford NER-based PHI detection** — semantic classification via `stanford-deidentifier-base` (F1 ≥ 97.9%)
 - **3-layer classification pipeline**: clinical allowlist → PHI heuristics → NER model
-- **EasyOCR-based text detection** with configurable confidence thresholds
+- **Multilingual EasyOCR** — 80+ languages via `ocr.languages` or script-family presets (`latin`, `cjk`, `arabic`, `cyrillic`, `indic`, `medical_eu`)
+- **Handwriting recognition** — optional TrOCR pass re-reads weak / handwritten OCR crops (`ocr.handwriting.enabled`)
+- **Vision-language models** — optional Florence-2 OCR-with-region pass finds text EasyOCR misses (`ocr.vlm.enabled`; requires `timm`)
 - **US fan-geometry scoped OCR** — reads `SequenceOfUltrasoundRegions` (0018,6011) from DICOM metadata to restrict OCR to non-diagnostic zones, eliminating false positives in the clinical fan area
 - **Pixel-level union masking** — for multi-frame volumes, PHI detected on any sampled keyframe is propagated and zeroed across all frames, ensuring no PHI survives between slices
 - **Adaptive keyframe sampling** — instead of scanning every frame, samples a configurable percentage (default 10%, minimum 3, maximum 25) and always includes the first and last frames
@@ -193,11 +195,20 @@ us_regions:
   zero_outside_regions: true      # Zero diagnostic pixels before OCR
 
 ocr:
-  languages: ['en']
+  languages: ['en']               # EasyOCR language codes (explicit list wins)
+  language_preset: ''             # or: latin | cjk | arabic | cyrillic | indic | medical_eu
   gpu_usage: false
   confidence_threshold: 0.4
   model_storage_directory: '${AEGIS_OCR_MODEL_DIR:}'      # pre-bundled EasyOCR weights dir
   download_enabled: '${AEGIS_MODEL_DOWNLOADS:true}'       # false → never download at runtime
+  handwriting:
+    enabled: false                # TrOCR re-recognition of weak / handwritten crops
+    model_name: 'microsoft/trocr-base-handwritten'
+    re_recognize_low_confidence: true
+  vlm:
+    enabled: false                # Florence-2 OCR_WITH_REGION (requires: pip install timm)
+    model_name: 'microsoft/Florence-2-base'
+    task: '<OCR_WITH_REGION>'
 
 ner:
   enabled: true                   # Set false to fall back to regex safelist
@@ -305,6 +316,37 @@ When `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline
 | 3. PHI heuristics | `ner.phi_heuristic_patterns` | **Redact** | `20260117-091825-6AAA` |
 | 4. Stanford NER | `ner.phi_labels` | **Redact if PHI** | Names, remaining identifiers |
 
+### Multilingual OCR, Handwriting, and Vision-Language Models
+
+Pixel text detection always starts with EasyOCR. Two optional stages extend coverage:
+
+| Stage | Config | Role |
+|-------|--------|------|
+| Multilingual OCR | `ocr.languages` or `ocr.language_preset` | Read burnt-in text in 80+ languages (script-compatible groups only) |
+| Handwriting (TrOCR) | `ocr.handwriting.enabled: true` | Re-recognize low-confidence crops as handwriting |
+| VLM (Florence-2) | `ocr.vlm.enabled: true` | Detect additional text regions OCR missed |
+
+```yaml
+# Example: European medical overlays + handwriting recovery
+ocr:
+  language_preset: medical_eu   # en, es, fr, de, it, pt, nl, pl
+  languages: []                 # leave empty so the preset applies
+  handwriting:
+    enabled: true
+  vlm:
+    enabled: false              # set true + pip install timm for Florence-2
+```
+
+Prefetch optional models before air-gapped use:
+
+```bash
+# Enable handwriting/vlm in config first, or force both:
+python scripts/prefetch_models.py --config monai_aegis/config/config.yaml --force-optional
+```
+
+Detection provenance is recorded in `aegis_pixel_detections.csv` as `source`
+(`easyocr` / `handwriting` / `vlm`).
+
 ### PII Mapping Actions
 | Action | Behavior | Example |
 |--------|----------|---------|
@@ -356,6 +398,7 @@ no DICOM header, so image runs emit only `aegis_pixel_detections.csv` —
 | `text_len` | Character length of the detected text |
 | `confidence` | OCR confidence |
 | `decision` | `redacted`, `safelisted`, or `low_confidence` |
+| `source` | Detector provenance: `easyocr`, `handwriting`, or `vlm` |
 
 **This file is PHI-free by design** — it lives inside the de-identified
 output, so the detected text appears only as a token. Same text → same

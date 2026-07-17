@@ -61,7 +61,12 @@ ocr:
   decoder: 'beamsearch'
   beam_width: 5
   confidence_threshold: 0.4
+  # Multilingual OCR: set an explicit language list OR a language_preset.
+  # Explicit languages win over language_preset. English may be paired with
+  # any EasyOCR language; other scripts generally cannot be mixed together.
+  # Presets: latin | cjk | arabic | cyrillic | indic | medical_eu
   languages: ['en']
+  language_preset: ''          # e.g. 'medical_eu' or 'cjk' — used when languages is empty
   gpu_usage: false
   # Air-gapped deployment: point at a pre-bundled EasyOCR weights directory
   # (populate with scripts/prefetch_models.py). Empty = EasyOCR default (~/.EasyOCR).
@@ -69,6 +74,33 @@ ocr:
   # Set false to guarantee EasyOCR never touches the network (weights must
   # already exist in model_storage_directory or the default cache).
   download_enabled: '${AEGIS_MODEL_DOWNLOADS:true}'
+
+  # Handwriting recognition (TrOCR) — re-reads weak EasyOCR crops as handwriting.
+  # Disabled by default (extra model + latency). Prefetch with scripts/prefetch_models.py.
+  handwriting:
+    enabled: false
+    model_name: 'microsoft/trocr-base-handwritten'
+    model_revision: ''           # pin a commit for production / air-gapped deploys
+    local_files_only: '${AEGIS_HF_OFFLINE:false}'
+    device: '${AEGIS_DEVICE:cpu}'
+    re_recognize_low_confidence: true   # re-read crops below ocr.confidence_threshold
+    re_recognize_all: false             # also re-read confident EasyOCR hits
+    confidence_threshold: 0.4           # accept TrOCR text at/above this score
+
+  # Vision-language model (Florence-2) — finds text regions EasyOCR may miss.
+  # Disabled by default. Requires: pip install timm
+  # Prefetch with scripts/prefetch_models.py when enabled.
+  vlm:
+    enabled: false
+    model_name: 'microsoft/Florence-2-base'
+    model_revision: ''
+    local_files_only: '${AEGIS_HF_OFFLINE:false}'
+    device: '${AEGIS_DEVICE:cpu}'
+    task: '<OCR_WITH_REGION>'
+    text_input: ''                      # optional prompt suffix for custom tasks
+    overlap_iou_threshold: 0.5          # skip VLM boxes that overlap EasyOCR hits
+    max_new_tokens: 1024
+
 
 ner:
   enabled: true

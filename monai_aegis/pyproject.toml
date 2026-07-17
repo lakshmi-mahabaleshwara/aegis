@@ -45,6 +45,9 @@ dev = [
     "mypy>=1.0.0",
     "pre-commit>=3.0.0",
 ]
+vlm = [
+    "timm>=0.9.0",
+]
 
 [project.scripts]
 aegis-pipeline = "monai_aegis.cli:main"

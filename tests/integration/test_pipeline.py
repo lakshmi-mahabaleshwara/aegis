@@ -1,11 +1,14 @@
 import unittest
 import os
 import shutil
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pydicom
 from PIL import Image
 
 from monai_aegis.transforms.pipeline import build_pipeline, build_image_pipeline
+
 
 class TestAegisPipeline(unittest.TestCase):
 
@@ -14,7 +17,7 @@ class TestAegisPipeline(unittest.TestCase):
         self.output_dir = 'tests/integration/temp_output'
         os.makedirs(self.test_dir, exist_ok=True)
         os.makedirs(self.output_dir, exist_ok=True)
-        
+
         # Create Dummy DICOM
         self.dcm_path = os.path.join(self.test_dir, 'test.dcm')
         ds = pydicom.Dataset()
@@ -22,7 +25,7 @@ class TestAegisPipeline(unittest.TestCase):
         ds.PatientID = "123456"
         ds.is_little_endian = True
         ds.is_implicit_VR = True
-        
+
         # File Meta
         file_meta = pydicom.dataset.FileMetaDataset()
         file_meta.MediaStorageSOPClassUID = '1.2.840.10008.5.1.4.1.1.7'
@@ -30,10 +33,10 @@ class TestAegisPipeline(unittest.TestCase):
         file_meta.ImplementationClassUID = '1.2.3.4'
         file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian
         ds.file_meta = file_meta
-        
+
         # Preamble is critical for dcmread without force=True
         ds.preamble = b"\0" * 128
-        
+
         # Create pixel data (10x10)
         pixel_array = np.zeros((10, 10), dtype=np.uint8)
         ds.PixelData = pixel_array.tobytes()
@@ -45,9 +48,9 @@ class TestAegisPipeline(unittest.TestCase):
         ds.PixelRepresentation = 0
         ds.SamplesPerPixel = 1
         ds.PhotometricInterpretation = "MONOCHROME2"
-        
+
         ds.save_as(self.dcm_path, write_like_original=False)
-        
+
         # Create Dummy JPEG
         self.jpg_path = os.path.join(self.test_dir, 'test.jpg')
         img = Image.new('RGB', (10, 10), color='white')
@@ -57,7 +60,15 @@ class TestAegisPipeline(unittest.TestCase):
         self.pipeline = build_pipeline()
         self.image_pipeline = build_image_pipeline()
 
+        # Avoid downloading / initializing real EasyOCR weights in CI/sandbox.
+        self._ocr_patcher = patch(
+            'monai_aegis.transforms.pixel.easyocr.Reader',
+            return_value=MagicMock(readtext=MagicMock(return_value=[])),
+        )
+        self._ocr_patcher.start()
+
     def tearDown(self):
+        self._ocr_patcher.stop()
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
         if os.path.exists(self.output_dir):

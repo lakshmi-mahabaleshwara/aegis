@@ -1,5 +1,7 @@
 """Unit tests for volume redaction in RedactPixelPHI."""
 import unittest
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 
 from monai_aegis.transforms.pixel import (
@@ -27,14 +29,19 @@ class TestVolumeRedaction(unittest.TestCase):
             'series': {'keyframe_count': 3},
         }
 
+    def _mock_reader(self):
+        reader = MagicMock()
+        reader.readtext.return_value = []
+        return reader
+
     def test_volume_shape_preserved(self):
         """Test that 4D volume shape (C,D,H,W) is preserved after redaction."""
         config = self._make_config()
         transform = RedactPixelPHI(config=config)
-
-        # Create a blank volume — no text should be detected
         volume = np.zeros((1, 5, 64, 64), dtype=np.float32)
-        result = transform(volume)
+
+        with patch('monai_aegis.transforms.pixel.easyocr.Reader', return_value=self._mock_reader()):
+            result = transform(volume)
 
         self.assertEqual(result.shape, (1, 5, 64, 64))
         self.assertEqual(result.dtype, np.float32)
@@ -43,9 +50,10 @@ class TestVolumeRedaction(unittest.TestCase):
         """Test that existing 3D (C,H,W) images still work."""
         config = self._make_config()
         transform = RedactPixelPHI(config=config)
-
         image = np.zeros((1, 64, 64), dtype=np.float32)
-        result = transform(image)
+
+        with patch('monai_aegis.transforms.pixel.easyocr.Reader', return_value=self._mock_reader()):
+            result = transform(image)
 
         self.assertEqual(result.shape, (1, 64, 64))
 
@@ -53,9 +61,10 @@ class TestVolumeRedaction(unittest.TestCase):
         """Test that redact() returns stats with volume-specific fields."""
         config = self._make_config()
         transform = RedactPixelPHI(config=config)
-
         volume = np.zeros((1, 3, 32, 32), dtype=np.float32)
-        _, stats = transform.redact(volume)
+
+        with patch('monai_aegis.transforms.pixel.easyocr.Reader', return_value=self._mock_reader()):
+            _, stats = transform.redact(volume)
 
         self.assertIn('volume_strategy', stats)
         self.assertIn('num_slices', stats)
@@ -67,9 +76,10 @@ class TestVolumeRedaction(unittest.TestCase):
         config = self._make_config()
         config['series']['keyframe_count'] = 5
         transform = RedactPixelPHI(config=config)
-
         volume = np.zeros((1, 2, 32, 32), dtype=np.float32)
-        _, stats = transform.redact(volume)
+
+        with patch('monai_aegis.transforms.pixel.easyocr.Reader', return_value=self._mock_reader()):
+            _, stats = transform.redact(volume)
 
         # With 2 slices and keyframe_count=5, all 2 slices are keyframes
         self.assertEqual(stats['keyframe_indices'], [0, 1])
@@ -79,7 +89,8 @@ class TestVolumeRedaction(unittest.TestCase):
         config = self._make_config()
         transform = RedactPixelPHI(config=config)
 
-        transform.redact(np.zeros((1, 2, 32, 32), dtype=np.float32))
+        with patch('monai_aegis.transforms.pixel.easyocr.Reader', return_value=self._mock_reader()):
+            transform.redact(np.zeros((1, 2, 32, 32), dtype=np.float32))
 
         self.assertFalse(hasattr(transform, 'last_stats'))
         self.assertFalse(hasattr(transform, '_vol_stats_acc'))

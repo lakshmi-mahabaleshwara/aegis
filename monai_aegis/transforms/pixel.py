@@ -2,11 +2,16 @@
 MONAI Aegis Pixel Transforms — RedactPixelPHI / RedactPixelPHId
 
 OCR-based visual PHI detection and redaction for medical images.
-Uses EasyOCR for text detection with two classification modes:
+Uses EasyOCR for multilingual text detection with two classification modes:
   1. Stanford NER (default) — semantic PHI classification via transformer model
   2. Regex Safelist (fallback) — pattern-based clinical marker preservation
 
-Thread-safe: uses threading.local() for per-thread EasyOCR and NER instances.
+Optional stages (config-gated, disabled by default):
+  - Handwriting recognition (TrOCR) — re-reads weak EasyOCR crops
+  - Vision-language model (Florence-2) — finds text regions OCR may miss
+
+Thread-safe: uses threading.local() for per-thread EasyOCR / NER / optional
+model instances.
 
 Raises:
     PixelRedactionError: When OCR detection or redaction fails.
@@ -26,6 +31,8 @@ from monai.utils.enums import TransformBackends
 from monai_aegis.transforms.exceptions import PixelRedactionError
 from monai_aegis.transforms import context_keys as ckeys
 from monai_aegis.transforms.context_keys import ck
+from monai_aegis.transforms.language_presets import resolve_ocr_languages
+from monai_aegis.config.config_loader import as_bool
 
 __all__ = [
     "detect_text", "apply_redaction",
@@ -54,13 +61,20 @@ def _bbox_to_xywh(bbox: Any) -> List[int]:
             int(round(max(xs) - x0)), int(round(max(ys) - y0))]
 
 
-def _make_detection(bbox: Any, text: str, prob: float, decision: str) -> Dict[str, Any]:
+def _make_detection(
+    bbox: Any,
+    text: str,
+    prob: float,
+    decision: str,
+    source: str = "easyocr",
+) -> Dict[str, Any]:
     """Build one per-region audit record for ground-truth reporting."""
     return {
         'bbox': _bbox_to_xywh(bbox),
         'ocr_text': str(text),
         'confidence': round(float(prob), 4),
         'decision': decision,
+        'source': source,
     }
 
 
@@ -69,14 +83,17 @@ def detect_text(
     ocr_reader: easyocr.Reader,
     config: Dict[str, Any],
     ner_classifier: Optional[Any] = None,
+    handwriting_recognizer: Optional[Any] = None,
+    vlm_detector: Optional[Any] = None,
 ) -> Tuple[List[List], Dict[str, Any]]:
     """
     Detect text in an image and return bounding boxes of PHI regions.
 
-    Uses one of two classification strategies:
-      - **NER mode** (when ``ner_classifier`` is provided): sends OCR text to
-        the Stanford de-identifier NER model for semantic PHI classification.
-      - **Safelist mode** (fallback): checks text against regex patterns from config.
+    Pipeline:
+      1. EasyOCR multilingual detection
+      2. Optional TrOCR handwriting re-recognition of weak crops
+      3. Optional Florence-2 VLM pass for missed regions
+      4. NER or safelist classification of confident hits
 
     Args:
         pixel_array: Image data as numpy array, ``uint8`` preferred.
@@ -85,12 +102,15 @@ def detect_text(
         config: Configuration dict with ``'ocr'`` and ``'safelist'`` sections.
         ner_classifier: Optional :py:class:`PHIClassifier` instance for
             NER-based detection. If ``None``, falls back to safelist mode.
+        handwriting_recognizer: Optional :py:class:`HandwritingRecognizer`.
+        vlm_detector: Optional :py:class:`VLMTextDetector`.
 
     Returns:
         Tuple of ``(bboxes, stats)``:
           - ``bboxes``: List of EasyOCR-format bounding boxes for redaction.
           - ``stats``: Dict with ``total_detections``, ``low_confidence_count``,
-            ``safelisted_count``, ``ner_classified_count``, ``redacted_count``.
+            ``safelisted_count``, ``ner_classified_count``, ``redacted_count``,
+            plus optional ``handwriting_count`` / ``vlm_count``.
 
     Raises:
         PixelRedactionError: If EasyOCR or NER classification raises an error.
@@ -102,10 +122,12 @@ def detect_text(
         'safelisted_count': 0,
         'ner_classified_count': 0,
         'redacted_count': 0,
+        'handwriting_count': 0,
+        'vlm_count': 0,
     }
     # Per-region audit trail (one entry per OCR detection) for ground-truth
-    # reporting/validation. Each entry: {bbox, ocr_text, confidence, decision}
-    # where decision is one of: 'redacted', 'safelisted', 'low_confidence'.
+    # reporting/validation. Each entry: {bbox, ocr_text, confidence, decision,
+    # source} where decision is one of: 'redacted', 'safelisted', 'low_confidence'.
     detections: List[Dict[str, Any]] = []
     ocr_settings = config.get('ocr', {})
 
@@ -120,45 +142,73 @@ def detect_text(
             beamWidth=beam_width
         )
 
-        stats['total_detections'] = len(results)
+        # (bbox, text, prob, source)
+        enriched: List[Tuple[Any, str, float, str]] = [
+            (bbox, text, prob, "easyocr") for (bbox, text, prob) in results
+        ]
+
+        if handwriting_recognizer is not None and getattr(
+            handwriting_recognizer, "enabled", False
+        ):
+            enriched = handwriting_recognizer.enrich_results(
+                pixel_array, results, confidence_threshold
+            )
+
+        if vlm_detector is not None and getattr(vlm_detector, "enabled", False):
+            vlm_hits = vlm_detector.detect(pixel_array)
+            enriched = vlm_detector.merge_novel_detections(enriched, vlm_hits)
+
+        stats['handwriting_count'] = sum(1 for *_, src in enriched if src == "handwriting")
+        stats['vlm_count'] = sum(1 for *_, src in enriched if src == "vlm")
+        stats['total_detections'] = len(enriched)
 
         # Separate low-confidence detections first
         confident_results = []
-        for (bbox, text, prob) in results:
+        for (bbox, text, prob, source) in enriched:
             if prob < confidence_threshold:
                 stats['low_confidence_count'] += 1
-                detections.append(_make_detection(bbox, text, prob, 'low_confidence'))
+                detections.append(
+                    _make_detection(bbox, text, prob, 'low_confidence', source)
+                )
             else:
-                confident_results.append((bbox, text, prob))
+                confident_results.append((bbox, text, prob, source))
 
         if ner_classifier is not None:
             # --- NER Mode: semantic PHI classification ---
-            texts = [text for (_, text, _) in confident_results]
+            texts = [text for (_, text, _, _) in confident_results]
             if texts:
                 phi_flags = ner_classifier.classify_texts(texts)
-                for (bbox, text, prob), is_phi in zip(confident_results, phi_flags):
+                for (bbox, text, prob, source), is_phi in zip(confident_results, phi_flags):
                     stats['ner_classified_count'] += 1
                     if is_phi:
                         bboxes.append(bbox)
                         stats['redacted_count'] += 1
-                        detections.append(_make_detection(bbox, text, prob, 'redacted'))
+                        detections.append(
+                            _make_detection(bbox, text, prob, 'redacted', source)
+                        )
                     else:
                         stats['safelisted_count'] += 1
-                        detections.append(_make_detection(bbox, text, prob, 'safelisted'))
+                        detections.append(
+                            _make_detection(bbox, text, prob, 'safelisted', source)
+                        )
         else:
             # --- Safelist Mode: regex-based clinical marker preservation ---
             safelist_patterns = config.get('safelist', [])
             compiled_patterns = [re.compile(p) for p in safelist_patterns]
 
-            for (bbox, text, prob) in confident_results:
+            for (bbox, text, prob, source) in confident_results:
                 is_safe = any(pattern.search(text) for pattern in compiled_patterns)
                 if is_safe:
                     stats['safelisted_count'] += 1
-                    detections.append(_make_detection(bbox, text, prob, 'safelisted'))
+                    detections.append(
+                        _make_detection(bbox, text, prob, 'safelisted', source)
+                    )
                 else:
                     bboxes.append(bbox)
                     stats['redacted_count'] += 1
-                    detections.append(_make_detection(bbox, text, prob, 'redacted'))
+                    detections.append(
+                        _make_detection(bbox, text, prob, 'redacted', source)
+                    )
 
     except Exception as e:
         raise PixelRedactionError(
@@ -365,8 +415,12 @@ class RedactPixelPHI(Transform):
         semantic, context-aware PHI detection.
       - **Regex safelist** (fallback) for pattern-based clinical marker preservation.
 
+    Optional stages (disabled by default):
+      - ``ocr.handwriting`` — TrOCR re-recognition of weak / handwritten crops
+      - ``ocr.vlm`` — Florence-2 vision-language pass for missed text regions
+
     Thread-safe: uses ``threading.local()`` so each worker thread gets its
-    own EasyOCR reader and NER classifier instances (loaded lazily on first use).
+    own model instances (loaded lazily on first use).
     This enables safe use with ``DataLoader(num_workers > 0)``.
 
     Args:
@@ -384,7 +438,11 @@ class RedactPixelPHI(Transform):
         super().__init__()
         self.config = config
         self._thread_local = threading.local()
-        self._ner_enabled = config.get('ner', {}).get('enabled', False)
+        self._ner_enabled = as_bool(config.get('ner', {}).get('enabled'), default=False)
+        hw = config.get('ocr', {}).get('handwriting', {})
+        vlm = config.get('ocr', {}).get('vlm', {})
+        self._handwriting_enabled = as_bool(hw.get('enabled'), default=False)
+        self._vlm_enabled = as_bool(vlm.get('enabled'), default=False)
 
     def __getstate__(self):
         """Exclude threading.local() from pickling for DataLoader multiprocessing."""
@@ -406,15 +464,20 @@ class RedactPixelPHI(Transform):
         ``ocr.model_storage_directory`` points EasyOCR at a pre-bundled
         weights directory, and ``ocr.download_enabled: false`` guarantees
         no network access — together they support air-gapped deployment.
+        Languages come from ``ocr.languages`` or ``ocr.language_preset``.
         """
         if not hasattr(self._thread_local, 'reader'):
-            from monai_aegis.config.config_loader import as_bool
             ocr_cfg = self.config['ocr']
+            languages = resolve_ocr_languages(ocr_cfg)
             self._thread_local.reader = easyocr.Reader(
-                ocr_cfg.get('languages', ['en']),
-                gpu=ocr_cfg.get('gpu_usage', False),
+                languages,
+                gpu=as_bool(ocr_cfg.get('gpu_usage'), default=False),
                 model_storage_directory=ocr_cfg.get('model_storage_directory') or None,
                 download_enabled=as_bool(ocr_cfg.get('download_enabled'), default=True),
+            )
+            logger.info(
+                "EasyOCR reader initialized for languages %s (thread: %s)",
+                languages, threading.current_thread().name,
             )
         return self._thread_local.reader
 
@@ -433,6 +496,34 @@ class RedactPixelPHI(Transform):
             logger.info("NER classifier initialized for thread: %s",
                         threading.current_thread().name)
         return self._thread_local.ner_classifier
+
+    @property
+    def handwriting_recognizer(self) -> Optional[Any]:
+        """Lazily create a per-thread TrOCR handwriting recognizer (if enabled)."""
+        if not self._handwriting_enabled:
+            return None
+        if not hasattr(self._thread_local, 'handwriting_recognizer'):
+            from monai_aegis.transforms.handwriting import HandwritingRecognizer
+            self._thread_local.handwriting_recognizer = HandwritingRecognizer(self.config)
+            logger.info(
+                "Handwriting recognizer initialized for thread: %s",
+                threading.current_thread().name,
+            )
+        return self._thread_local.handwriting_recognizer
+
+    @property
+    def vlm_detector(self) -> Optional[Any]:
+        """Lazily create a per-thread Florence-2 VLM detector (if enabled)."""
+        if not self._vlm_enabled:
+            return None
+        if not hasattr(self._thread_local, 'vlm_detector'):
+            from monai_aegis.transforms.vlm_detector import VLMTextDetector
+            self._thread_local.vlm_detector = VLMTextDetector(self.config)
+            logger.info(
+                "VLM text detector initialized for thread: %s",
+                threading.current_thread().name,
+            )
+        return self._thread_local.vlm_detector
 
     def __call__(self, image: np.ndarray) -> np.ndarray:
         """Detect and redact burned-in PHI text.
@@ -498,9 +589,14 @@ class RedactPixelPHI(Transform):
         else:
             norm_ocr = pixel_array
 
-        # Detect and Redact (with NER if enabled)
+        # Detect and Redact (with NER / optional handwriting / VLM if enabled)
         bboxes, stats = detect_text(
-            norm_ocr, self.reader, self.config, self.ner_classifier
+            norm_ocr,
+            self.reader,
+            self.config,
+            self.ner_classifier,
+            handwriting_recognizer=self.handwriting_recognizer,
+            vlm_detector=self.vlm_detector,
         )
         redacted = apply_redaction(pixel_array, bboxes)
 
@@ -581,6 +677,8 @@ class RedactPixelPHI(Transform):
             'low_confidence_count': sum(s.get('low_confidence_count', 0) for s in acc),
             'safelisted_count':    sum(s.get('safelisted_count', 0) for s in acc),
             'ner_classified_count': sum(s.get('ner_classified_count', 0) for s in acc),
+            'handwriting_count':   sum(s.get('handwriting_count', 0) for s in acc),
+            'vlm_count':           sum(s.get('vlm_count', 0) for s in acc),
             'redacted_count':      phi_pixels,
             'volume_strategy':     'adaptive_union',
             'num_slices':          D,

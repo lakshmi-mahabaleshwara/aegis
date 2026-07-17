@@ -50,14 +50,14 @@ TAG_ACTIONS_FILE = "aegis_tag_actions.csv"
 PIXEL_FIELDS = [
     "source_path", "original_sop_uid", "deid_sop_uid",
     "frame_index", "bbox_x", "bbox_y", "bbox_w", "bbox_h",
-    "text_token", "text_len", "confidence", "decision",
+    "text_token", "text_len", "confidence", "decision", "source",
 ]
 # Opt-in PHI report: verbatim OCR text. Written only via write_phi_report,
 # only to a directory outside the de-identified output.
 PIXEL_PHI_FIELDS = [
     "source_path", "original_sop_uid", "deid_sop_uid",
     "frame_index", "bbox_x", "bbox_y", "bbox_w", "bbox_h",
-    "ocr_text", "confidence", "decision",
+    "ocr_text", "confidence", "decision", "source",
 ]
 TAG_FIELDS = [
     "source_path", "original_sop_uid", "deid_sop_uid",
@@ -136,6 +136,7 @@ def extract_records(
             "ocr_text": det.get("ocr_text", ""),
             "confidence": det.get("confidence", ""),
             "decision": det.get("decision", ""),
+            "source": det.get("source", "easyocr"),
         })
 
     # --- Header-tag actions ---

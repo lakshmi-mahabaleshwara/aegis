@@ -9,6 +9,8 @@ runtime so it can then run with zero network access:
      (or ``HF_HOME`` if set).
   2. The EasyOCR detection + recognition weights for the configured
      languages → ``ocr.model_storage_directory`` (or EasyOCR's default).
+  3. Optional TrOCR handwriting weights when ``ocr.handwriting.enabled``.
+  4. Optional Florence-2 VLM weights when ``ocr.vlm.enabled``.
 
 Typical uses::
 
@@ -27,7 +29,8 @@ import argparse
 import logging
 import sys
 
-from monai_aegis.config.config_loader import load_config
+from monai_aegis.config.config_loader import as_bool, load_config
+from monai_aegis.transforms.language_presets import resolve_ocr_languages
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("prefetch_models")
@@ -35,7 +38,7 @@ logger = logging.getLogger("prefetch_models")
 
 def prefetch_ner(config: dict) -> None:
     ner_cfg = config.get("ner", {})
-    if not ner_cfg.get("enabled", False):
+    if not as_bool(ner_cfg.get("enabled"), default=False):
         logger.info("NER disabled in config — skipping HuggingFace prefetch")
         return
 
@@ -56,7 +59,7 @@ def prefetch_easyocr(config: dict, easyocr_dir: str | None) -> None:
     import easyocr
 
     ocr_cfg = config.get("ocr", {})
-    languages = ocr_cfg.get("languages", ["en"])
+    languages = resolve_ocr_languages(ocr_cfg)
     target_dir = easyocr_dir or ocr_cfg.get("model_storage_directory") or None
     logger.info(
         "Prefetching EasyOCR weights for %s into %s...",
@@ -71,6 +74,36 @@ def prefetch_easyocr(config: dict, easyocr_dir: str | None) -> None:
         verbose=False,
     )
     logger.info("EasyOCR weights ready in: %s", target_dir or "~/.EasyOCR/model")
+
+
+def prefetch_handwriting(config: dict) -> None:
+    hw = config.get("ocr", {}).get("handwriting", {})
+    if not as_bool(hw.get("enabled"), default=False):
+        logger.info("Handwriting disabled in config — skipping TrOCR prefetch")
+        return
+
+    from huggingface_hub import snapshot_download
+
+    model_name = hw.get("model_name", "microsoft/trocr-base-handwritten")
+    revision = hw.get("model_revision") or None
+    logger.info("Prefetching handwriting model %s (revision: %s)...", model_name, revision or "default")
+    path = snapshot_download(repo_id=model_name, revision=revision)
+    logger.info("Handwriting model cached at: %s", path)
+
+
+def prefetch_vlm(config: dict) -> None:
+    vlm = config.get("ocr", {}).get("vlm", {})
+    if not as_bool(vlm.get("enabled"), default=False):
+        logger.info("VLM disabled in config — skipping Florence-2 prefetch")
+        return
+
+    from huggingface_hub import snapshot_download
+
+    model_name = vlm.get("model_name", "microsoft/Florence-2-base")
+    revision = vlm.get("model_revision") or None
+    logger.info("Prefetching VLM %s (revision: %s)...", model_name, revision or "default")
+    path = snapshot_download(repo_id=model_name, revision=revision)
+    logger.info("VLM cached at: %s", path)
 
 
 def main() -> int:
@@ -88,6 +121,13 @@ def main() -> int:
     )
     parser.add_argument("--skip-ner", action="store_true", help="Skip the HuggingFace NER model")
     parser.add_argument("--skip-ocr", action="store_true", help="Skip the EasyOCR weights")
+    parser.add_argument("--skip-handwriting", action="store_true", help="Skip TrOCR weights")
+    parser.add_argument("--skip-vlm", action="store_true", help="Skip Florence-2 VLM weights")
+    parser.add_argument(
+        "--force-optional",
+        action="store_true",
+        help="Prefetch handwriting + VLM even when disabled in config",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -96,6 +136,16 @@ def main() -> int:
         prefetch_ner(config)
     if not args.skip_ocr:
         prefetch_easyocr(config, args.easyocr_dir)
+
+    if args.force_optional:
+        # Temporarily enable so the prefetch helpers run.
+        config.setdefault("ocr", {}).setdefault("handwriting", {})["enabled"] = True
+        config.setdefault("ocr", {}).setdefault("vlm", {})["enabled"] = True
+
+    if not args.skip_handwriting:
+        prefetch_handwriting(config)
+    if not args.skip_vlm:
+        prefetch_vlm(config)
 
     logger.info(
         "Done. For air-gapped runs set: AEGIS_HF_OFFLINE=true AEGIS_MODEL_DOWNLOADS=false"
