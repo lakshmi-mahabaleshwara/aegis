@@ -31,6 +31,9 @@ from monai_aegis.transforms.us_regions import RedactByUSRegions, RedactByUSRegio
 from monai_aegis.transforms.metadata import ScrubDicomMetadata, ScrubDicomMetadatad
 from monai_aegis.transforms.utility import AegisIdentityManager
 from monai_aegis.transforms.ner_classifier import PHIClassifier
+from monai_aegis.transforms.handwriting import HandwritingRecognizer
+from monai_aegis.transforms.vlm_detector import VLMTextDetector
+from monai_aegis.transforms.language_presets import LANGUAGE_PRESETS, resolve_ocr_languages
 from monai_aegis.transforms.pipeline import build_pipeline, build_series_pipeline
 from monai_aegis.transforms.discovery import (
     DicomSliceInfo,
@@ -76,6 +79,11 @@ __all__ = [
     "ScrubDicomMetadatad",
     # NER
     "PHIClassifier",
+    # Optional OCR stages
+    "HandwritingRecognizer",
+    "VLMTextDetector",
+    "LANGUAGE_PRESETS",
+    "resolve_ocr_languages",
     # Utilities
     "AegisIdentityManager",
     # Pipeline

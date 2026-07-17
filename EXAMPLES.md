@@ -173,6 +173,35 @@ ocr:
                                 # Higher = stricter filtering (may miss faint text)
 ```
 
+### Multilingual OCR
+
+```yaml
+ocr:
+  # Option A — explicit EasyOCR codes (wins over language_preset)
+  languages: ['en', 'es', 'fr', 'de']
+  # Option B — script-family preset (used when languages is empty)
+  # languages: []
+  # language_preset: medical_eu   # latin | cjk | arabic | cyrillic | indic | medical_eu
+```
+
+### Handwriting Recognition (TrOCR)
+
+```yaml
+ocr:
+  handwriting:
+    enabled: true
+    re_recognize_low_confidence: true  # re-read weak EasyOCR crops
+```
+
+### Vision-Language Model (Florence-2)
+
+```yaml
+ocr:
+  vlm:
+    enabled: true                 # requires: pip install timm  (or pip install -e ".[vlm]")
+    task: '<OCR_WITH_REGION>'
+```
+
 ### Enable / Disable NER
 
 ```yaml

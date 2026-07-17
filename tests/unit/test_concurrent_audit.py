@@ -122,7 +122,14 @@ class TestConcurrentPixelAuditIsolation(unittest.TestCase):
         # detect_text is mocked to report a detection count derived from
         # the image content, so each thread can verify it got back the
         # stats for the image it submitted.
-        def fake_detect_text(pixel_array, reader, config, ner_classifier=None):
+        def fake_detect_text(
+            pixel_array,
+            reader,
+            config,
+            ner_classifier=None,
+            handwriting_recognizer=None,
+            vlm_detector=None,
+        ):
             marker = int(pixel_array.max())  # 10 for image A, 20 for image B
             time.sleep(0.001)  # widen the race window
             stats = {

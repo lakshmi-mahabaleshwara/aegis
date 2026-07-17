@@ -244,9 +244,10 @@ class TestRedactByUSRegionsd(unittest.TestCase):
 class TestPixelRedactionWithUSMask(unittest.TestCase):
     """Integration: verify RedactPixelPHId respects the US PHI mask."""
 
+    @patch('monai_aegis.transforms.pixel.easyocr.Reader')
     @patch('monai_aegis.transforms.pixel.detect_text')
     @patch('monai_aegis.transforms.pixel.apply_redaction')
-    def test_ocr_receives_masked_pixels(self, mock_apply, mock_detect):
+    def test_ocr_receives_masked_pixels(self, mock_apply, mock_detect, mock_reader):
         """When US mask is present, diagnostic pixels should be zeroed before OCR."""
         from monai_aegis.transforms.pixel import RedactPixelPHId
 
@@ -291,9 +292,10 @@ class TestPixelRedactionWithUSMask(unittest.TestCase):
         # Stats should include us_region_mask_applied flag
         self.assertTrue(result['image_redaction_stats'].get('us_region_mask_applied'))
 
+    @patch('monai_aegis.transforms.pixel.easyocr.Reader')
     @patch('monai_aegis.transforms.pixel.detect_text')
     @patch('monai_aegis.transforms.pixel.apply_redaction')
-    def test_diagnostic_pixels_restored_after_ocr(self, mock_apply, mock_detect):
+    def test_diagnostic_pixels_restored_after_ocr(self, mock_apply, mock_detect, mock_reader):
         """After OCR, diagnostic region pixels must be restored from original."""
         from monai_aegis.transforms.pixel import RedactPixelPHId
 

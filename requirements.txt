@@ -5,3 +5,6 @@ pillow
 pyyaml
 transformers
 mcp[cli]
+# Optional: vision-language model (Florence-2) support
+# timm
+
