@@ -189,6 +189,11 @@ safelist:
   - '(?i)patient'
   - '(?i)hospital'
 
+# Instance/Study/Series/FrameOfReference UIDs are NOT listed here: they are
+# replaced (PS3.15 action U) by the scrubber's deterministic UID remap, which
+# rewrites every patient-linkable UID to a new, internally consistent value
+# while preserving SOP-Class / Transfer-Syntax UIDs. Do not add them here as
+# REMOVE/DUMMY — dropping or tokenizing a required UID corrupts the object.
 pii_mapping:
   '(0010,0010)': 'DUMMY'   # PatientName
   '(0010,0020)': 'DUMMY'   # PatientID

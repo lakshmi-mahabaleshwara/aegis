@@ -58,7 +58,25 @@ DICOM_CHECK_TYPES: Dict[str, set] = {
     "tag_matches": {"tag", "pattern"},
     "no_private_tags": set(),
     "file_meta_consistent": set(),
+    "instance_uids_remapped": {"root"},
 }
+
+# UID keywords that name an object *class* or the implementation rather than a
+# patient-linkable instance — the scrubber preserves these verbatim, so the
+# verifier must not expect them to be remapped. UIDs under the DICOM standard
+# root identify object types too. Both mirror the scrubber's own preserve
+# rules, duplicated here so verification keeps depending only on pydicom +
+# PyYAML (it must run where the OCR/NER stack is not installed).
+_PRESERVE_UID_KEYWORDS = frozenset(
+    [
+        "SOPClassUID",
+        "MediaStorageSOPClassUID",
+        "TransferSyntaxUID",
+        "ImplementationClassUID",
+        "ReferencedSOPClassUID",
+    ]
+)
+_DICOM_STANDARD_UID_ROOT = "1.2.840.10008"
 RUN_CHECK_TYPES: Dict[str, set] = {
     "report_present": {"file"},
     "report_columns_forbidden": {"file", "columns"},
@@ -163,6 +181,26 @@ def _check_dataset(ds: pydicom.Dataset, check: Dict[str, Any]) -> Tuple[bool, st
         if str(meta.get("MediaStorageSOPInstanceUID", "")) != str(getattr(ds, "SOPInstanceUID", "")):
             return False, "MediaStorageSOPInstanceUID does not match SOPInstanceUID"
         return True, ""
+    if check_type == "instance_uids_remapped":
+        root = str(check["root"])
+        foreign = 0
+        for elem in ds.iterall():
+            if elem.VR != "UI" or elem.value is None:
+                continue
+            keyword = pydicom.datadict.keyword_for_tag(elem.tag) or ""
+            if keyword in _PRESERVE_UID_KEYWORDS:
+                continue
+            values = [elem.value] if isinstance(elem.value, str) else list(elem.value)
+            for value in values:
+                uid = str(value or "").strip()
+                if not uid or uid.startswith(_DICOM_STANDARD_UID_ROOT):
+                    continue
+                if not uid.startswith(root):
+                    foreign += 1
+        # A foreign-root instance/study/series UID is an original,
+        # institution-issued identifier that survived de-identification —
+        # linkable back to the source. The UID value is never echoed.
+        return foreign == 0, f"{foreign} patient-linkable UID(s) not remapped under root {root!r}"
 
     tag = check["_tag"]
     label = f"tag {check['tag']}"

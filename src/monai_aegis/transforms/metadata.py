@@ -115,6 +115,69 @@ class ScrubDicomMetadata(Transform):
             self._uid_cache[source] = cached
         return cached
 
+    def _remap_uid_value(self, value: Any, fallback_entropy: str = "") -> Any:
+        """Remap one UID value, preserving class- and standard-defined UIDs.
+
+        UIDs under the DICOM standard root identify object *types* (SOP
+        Class, Transfer Syntax, coding schemes) — never patients — so they
+        pass through verbatim; rewriting them would make the object invalid.
+        Empty values are left untouched. Everything else is a
+        patient-linkable instance/study/series/frame identifier and is
+        remapped deterministically.
+        """
+        source = str(value or "").strip()
+        if not source or source.startswith(self._DICOM_STANDARD_UID_ROOT):
+            return value
+        return self.remap_uid(source, fallback_entropy=fallback_entropy)
+
+    def _remap_uids_recursive(
+        self,
+        ds: pydicom.Dataset,
+        tag_actions: list,
+        fallback_entropy: str = "",
+    ) -> None:
+        """Remap every patient-linkable UID on a dataset and nested items.
+
+        Walks all ``UI``-valued elements (recursing into sequences) and
+        remaps them via :meth:`_remap_uid_value`, except those whose keyword
+        names an object class or the implementation
+        (:attr:`_PRESERVE_UID_KEYWORDS`). Because :meth:`remap_uid` is
+        deterministic and cached, a UID that appears in several places — a
+        SeriesInstanceUID shared across slices, or a ReferencedSOPInstanceUID
+        pointing at another instance in the same object — is rewritten to the
+        *same* replacement everywhere, so cross-references stay intact.
+        Each rewrite is recorded in the per-call audit trail.
+        """
+        for elem in ds:
+            if elem.VR == "SQ":
+                for item in elem.value:
+                    if isinstance(item, pydicom.Dataset):
+                        self._remap_uids_recursive(item, tag_actions, fallback_entropy)
+                continue
+            if elem.VR != "UI" or elem.value is None:
+                continue
+            keyword = pydicom.datadict.keyword_for_tag(elem.tag) or ''
+            if keyword in self._PRESERVE_UID_KEYWORDS:
+                continue
+            # A UID element is either a single value (pydicom.uid.UID, a str
+            # subclass) or a MultiValue of them; handle both uniformly.
+            if isinstance(elem.value, str):
+                new_value = self._remap_uid_value(elem.value, fallback_entropy)
+                changed = str(new_value) != str(elem.value)
+            else:
+                originals = list(elem.value)
+                new_value = [self._remap_uid_value(v, fallback_entropy) for v in originals]
+                changed = any(str(a) != str(b) for a, b in zip(new_value, originals))
+            if not changed:
+                continue
+            elem.value = new_value
+            tag_actions.append({
+                'tag': '({:04X},{:04X})'.format(elem.tag.group, elem.tag.element),
+                'keyword': keyword,
+                'action': 'REMAP',
+                'redacted': True,
+            })
+
     @staticmethod
     def _parse_hex_part(s: str) -> int:
         """Parse one DICOM tag group/element string as a hex integer.
@@ -424,12 +487,22 @@ class ScrubDicomMetadata(Transform):
             ds.WindowCenter = str((p_max + p_min) / 2)
             ds.WindowWidth = str(p_max - p_min)
 
-        # 3. Regenerate the SOP Instance UID (PS3.15: replaced, not kept).
-        #    Deterministic from (salt, original UID) so identical inputs
-        #    reproduce identical outputs — see :meth:`remap_uid`. file_meta
-        #    is kept in sync so the output stays a valid DICOM Part 10 file.
-        ds.SOPInstanceUID = self.remap_uid(original_sop_uid, fallback_entropy=uri)
-        if hasattr(ds, 'file_meta') and ds.file_meta is not None:
+        # 3. Remap every patient-linkable UID (PS3.15 action U): SOP / Study /
+        #    Series / FrameOfReference instance UIDs and any UID referenced in
+        #    nested sequences, all replaced with new, internally consistent
+        #    values. Class- and implementation-identifying UIDs (SOP Class,
+        #    Transfer Syntax, ...) and anything under the DICOM standard root
+        #    are preserved so the output stays a valid DICOM object. The remap
+        #    is deterministic, so every slice sharing a Study/Series UID
+        #    receives the same replacement — Study/Series links survive while
+        #    the original institutional UIDs do not.
+        self._remap_uids_recursive(ds, tag_actions, fallback_entropy=uri)
+        # A valid Part 10 object must carry a SOP Instance UID even when the
+        # source omitted one; mint it deterministically from the file path.
+        if 'SOPInstanceUID' not in ds or not str(getattr(ds, 'SOPInstanceUID', '')).strip():
+            ds.SOPInstanceUID = self.remap_uid(original_sop_uid, fallback_entropy=uri)
+        # Keep file_meta in sync so the object stays internally consistent.
+        if hasattr(ds, 'file_meta') and ds.file_meta is not None and 'SOPInstanceUID' in ds:
             ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
 
         # 4. De-identification attestation (PS3.15) — stamped last so the

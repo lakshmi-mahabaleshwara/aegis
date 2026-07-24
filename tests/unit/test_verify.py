@@ -348,3 +348,54 @@ def test_image_only_run_tag_report_warning_only(tmp_path):
     report = verify.verify_run(str(run))
     assert report["status"] == "pass"
     assert {f["check"] for f in report["findings"]} == {"tag-report-present"}
+
+
+# ---------------------------------------------------------------------------
+# instance_uids_remapped — patient-linkable UIDs must not survive de-id
+# ---------------------------------------------------------------------------
+
+_REMAP_YAML = (
+    "name: x\ndicom_checks:\n"
+    "  - type: instance_uids_remapped\n"
+    "    root: '1.2.826.0.1.3680043.8.498.'\n"
+)
+
+
+def test_instance_uids_remapped_passes_when_all_under_root(tmp_path):
+    ds = _base_dataset(
+        StudyInstanceUID="1.2.826.0.1.3680043.8.498.100",
+        SeriesInstanceUID="1.2.826.0.1.3680043.8.498.200",
+    )
+    report = _one_check_run(tmp_path, ds, _REMAP_YAML)
+    assert report["status"] == "pass"
+
+
+def test_instance_uids_remapped_fails_on_foreign_root(tmp_path):
+    ds = _base_dataset(
+        StudyInstanceUID="1.2.840.113619.2.55.3.100",   # original GE-issued UID
+        SeriesInstanceUID="1.2.840.113619.2.55.3.200",  # survived de-identification
+    )
+    report = _one_check_run(tmp_path, ds, _REMAP_YAML)
+    assert report["status"] == "fail"
+    finding = next(f for f in report["findings"] if f["check"] == "instance_uids_remapped")
+    assert "2 patient-linkable UID" in finding["detail"]
+    # the offending UID value is never echoed into the report
+    assert "1.2.840.113619" not in json.dumps(report)
+
+
+def test_instance_uids_remapped_ignores_class_uids(tmp_path):
+    # SOPClassUID lives under the DICOM standard root and must not be flagged
+    # even though it is not under the remap root.
+    ds = _base_dataset(StudyInstanceUID="1.2.826.0.1.3680043.8.498.100")
+    ds.SOPClassUID = "1.2.840.10008.5.1.4.1.1.4"  # MR Image Storage
+    report = _one_check_run(tmp_path, ds, _REMAP_YAML)
+    assert report["status"] == "pass"
+
+
+def test_instance_uids_remapped_in_default_checklist(tmp_path):
+    # The packaged checklist ships the rule and a real Aegis-shaped output
+    # (all UIDs under the pydicom root) satisfies it.
+    report = verify.verify_run(str(_clean_run(tmp_path)))
+    assert report["status"] == "pass"
+    ids = {c["id"] for c in verify.load_checklist()["dicom_checks"]}
+    assert "instance-uids-remapped" in ids

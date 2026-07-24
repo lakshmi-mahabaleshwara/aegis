@@ -53,6 +53,15 @@ dicom_checks:
     type: no_private_tags
   - id: file-meta-consistent
     type: file_meta_consistent
+  - id: instance-uids-remapped
+    # Every patient-linkable UID (SOP / Study / Series / FrameOfReference and
+    # any referenced instance UID) must be replaced with an Aegis-generated
+    # UID under the deterministic remap root. A UID outside this root is an
+    # original, institution-issued identifier that survived — linkable back to
+    # the source study. SOP-Class / Transfer-Syntax UIDs (DICOM standard root)
+    # are exempt. Deployments that customize the remap root override this root.
+    type: instance_uids_remapped
+    root: "1.2.826.0.1.3680043.8.498."
 
 run_checks:
   - id: pixel-report-present

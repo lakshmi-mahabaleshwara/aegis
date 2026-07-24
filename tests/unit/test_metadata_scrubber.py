@@ -138,5 +138,114 @@ class TestScrubDicomMetadata(unittest.TestCase):
         for elem in nested_scrubbed:
             self.assertFalse(elem.tag.is_private, "Nested private tags should be removed")
 
+
+# Roots used to tell apart "original, institution-issued" UIDs from the ones
+# the scrubber generates. Foreign root = a value that must be replaced;
+# pydicom root = where remap_uid lands; standard root = preserved verbatim.
+_FOREIGN_ROOT = "1.2.840.113619.2.55.3."      # e.g. a GE-issued UID root
+_PYDICOM_ROOT = "1.2.826.0.1.3680043.8.498."  # generate_uid() default root
+_STD_ROOT = "1.2.840.10008"                   # DICOM standard (class) root
+
+
+class TestUidGraphRemap(unittest.TestCase):
+    """The scrubber replaces every patient-linkable UID (PS3.15 action U)."""
+
+    def _make_ds(self, sop="1", study="100", series="200", frame="300", salt="s1"):
+        ds = Dataset()
+        ds.PatientName = "Test^Patient"
+        ds.SOPClassUID = _STD_ROOT + ".5.1.4.1.1.7"
+        ds.SOPInstanceUID = _FOREIGN_ROOT + sop
+        ds.StudyInstanceUID = _FOREIGN_ROOT + study
+        ds.SeriesInstanceUID = _FOREIGN_ROOT + series
+        ds.FrameOfReferenceUID = _FOREIGN_ROOT + frame
+        ref = Dataset()
+        ref.ReferencedSOPClassUID = _STD_ROOT + ".5.1.4.1.1.7"
+        # Points at the study UID value on purpose — used to prove that a UID
+        # reused across the object is rewritten to the same replacement.
+        ref.ReferencedSOPInstanceUID = _FOREIGN_ROOT + study
+        ds.add_new((0x0008, 0x1140), "SQ", Sequence([ref]))  # ReferencedImageSequence
+        fm = FileMetaDataset()
+        fm.MediaStorageSOPClassUID = ds.SOPClassUID
+        fm.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+        fm.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+        ds.file_meta = fm
+        return ds
+
+    def _scrub(self, ds, salt="s1"):
+        cfg = {"pii_mapping": {}, "tokenization": {"salt": salt}}
+        return ScrubDicomMetadata(config=cfg).scrub("f.dcm", dataset=ds)
+
+    def test_all_patient_linkable_uids_are_remapped(self):
+        out, _ = self._scrub(self._make_ds())
+        for keyword in ("SOPInstanceUID", "StudyInstanceUID",
+                        "SeriesInstanceUID", "FrameOfReferenceUID"):
+            value = str(getattr(out, keyword))
+            self.assertTrue(value.startswith(_PYDICOM_ROOT),
+                            f"{keyword} not remapped: {value}")
+            self.assertFalse(value.startswith(_FOREIGN_ROOT),
+                             f"{keyword} kept its original value")
+
+    def test_class_and_standard_root_uids_are_preserved(self):
+        out, _ = self._scrub(self._make_ds())
+        self.assertEqual(str(out.SOPClassUID), _STD_ROOT + ".5.1.4.1.1.7")
+        self.assertEqual(str(out.file_meta.MediaStorageSOPClassUID),
+                         _STD_ROOT + ".5.1.4.1.1.7")
+        ref = out[(0x0008, 0x1140)].value[0]
+        self.assertEqual(str(ref.ReferencedSOPClassUID), _STD_ROOT + ".5.1.4.1.1.7")
+
+    def test_file_meta_stays_consistent(self):
+        out, _ = self._scrub(self._make_ds())
+        self.assertEqual(str(out.file_meta.MediaStorageSOPInstanceUID),
+                         str(out.SOPInstanceUID))
+
+    def test_shared_uid_rewritten_consistently_preserving_references(self):
+        # ReferencedSOPInstanceUID held the same value as StudyInstanceUID in
+        # the input; both must land on the identical replacement so the
+        # cross-reference still resolves after de-identification.
+        out, _ = self._scrub(self._make_ds())
+        ref = out[(0x0008, 0x1140)].value[0]
+        self.assertEqual(str(ref.ReferencedSOPInstanceUID),
+                         str(out.StudyInstanceUID))
+
+    def test_remap_is_deterministic_across_instances(self):
+        out1, _ = self._scrub(self._make_ds(), salt="same")
+        out2, _ = self._scrub(self._make_ds(), salt="same")
+        self.assertEqual(str(out1.StudyInstanceUID), str(out2.StudyInstanceUID))
+        self.assertEqual(str(out1.SeriesInstanceUID), str(out2.SeriesInstanceUID))
+        self.assertEqual(str(out1.SOPInstanceUID), str(out2.SOPInstanceUID))
+
+    def test_salt_changes_the_mapping(self):
+        out1, _ = self._scrub(self._make_ds(), salt="salt-a")
+        out2, _ = self._scrub(self._make_ds(), salt="salt-b")
+        self.assertNotEqual(str(out1.StudyInstanceUID), str(out2.StudyInstanceUID))
+
+    def test_two_slices_share_series_uid_but_differ_by_instance(self):
+        # Same series, different instances → same remapped SeriesInstanceUID,
+        # distinct remapped SOPInstanceUIDs. This is the series-linkage contract.
+        out1, _ = self._scrub(self._make_ds(sop="1"), salt="k")
+        out2, _ = self._scrub(self._make_ds(sop="2"), salt="k")
+        self.assertEqual(str(out1.SeriesInstanceUID), str(out2.SeriesInstanceUID))
+        self.assertNotEqual(str(out1.SOPInstanceUID), str(out2.SOPInstanceUID))
+
+    def test_remap_actions_are_audited(self):
+        _, actions = self._scrub(self._make_ds())
+        remapped = {a["keyword"] for a in actions if a["action"] == "REMAP"}
+        self.assertEqual(
+            remapped,
+            {"SOPInstanceUID", "StudyInstanceUID", "SeriesInstanceUID",
+             "FrameOfReferenceUID", "ReferencedSOPInstanceUID"},
+        )
+        self.assertTrue(all(a["redacted"] for a in actions if a["action"] == "REMAP"))
+
+    def test_missing_sop_uid_is_minted(self):
+        ds = self._make_ds()
+        del ds.SOPInstanceUID
+        del ds.file_meta.MediaStorageSOPInstanceUID
+        out, _ = self._scrub(ds)
+        self.assertTrue(str(out.SOPInstanceUID).startswith(_PYDICOM_ROOT))
+        self.assertEqual(str(out.file_meta.MediaStorageSOPInstanceUID),
+                         str(out.SOPInstanceUID))
+
+
 if __name__ == '__main__':
     unittest.main()

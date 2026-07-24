@@ -31,7 +31,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from monai_aegis import api, envelope, skill_cli
 
 SALT = "integration-test-salt"
-ORIGINAL_SOP_UID = "1.2.826.0.1.3680043.8.498.1000"
+# Original, institution-issued UIDs (a foreign root) — de-identification must
+# replace every one of them with an Aegis-generated UID under the pydicom root.
+_FOREIGN_ROOT = "1.2.840.113619.2.55.3."
+_PYDICOM_ROOT = "1.2.826.0.1.3680043.8.498."
+ORIGINAL_SOP_UID = _FOREIGN_ROOT + "1000"
+ORIGINAL_STUDY_UID = _FOREIGN_ROOT + "2000"
+ORIGINAL_SERIES_UID = _FOREIGN_ROOT + "3000"
 
 
 def _make_dicom(path: Path) -> None:
@@ -41,8 +47,8 @@ def _make_dicom(path: Path) -> None:
     ds.Modality = "OT"
     ds.SOPClassUID = "1.2.840.10008.5.1.4.1.1.7"
     ds.SOPInstanceUID = ORIGINAL_SOP_UID
-    ds.StudyInstanceUID = "1.2.826.0.1.3680043.8.498.2000"
-    ds.SeriesInstanceUID = "1.2.826.0.1.3680043.8.498.3000"
+    ds.StudyInstanceUID = ORIGINAL_STUDY_UID
+    ds.SeriesInstanceUID = ORIGINAL_SERIES_UID
 
     file_meta = pydicom.dataset.FileMetaDataset()
     file_meta.MediaStorageSOPClassUID = ds.SOPClassUID
@@ -135,6 +141,30 @@ def test_output_dicom_attested_and_tokenized(runs):
     assert str(ds.PatientID).startswith("TOKEN_")
     assert str(ds.SOPInstanceUID) != ORIGINAL_SOP_UID
     assert str(ds.file_meta.MediaStorageSOPInstanceUID) == str(ds.SOPInstanceUID)
+
+
+def test_output_dicom_all_uids_remapped_off_foreign_root(runs):
+    # Every patient-linkable UID must be replaced with an Aegis-generated one;
+    # none of the original institution-issued UIDs may survive.
+    _in_dir, results = runs
+    ds = _output_dicom(results, "run1")
+    for keyword, original in (
+        ("SOPInstanceUID", ORIGINAL_SOP_UID),
+        ("StudyInstanceUID", ORIGINAL_STUDY_UID),
+        ("SeriesInstanceUID", ORIGINAL_SERIES_UID),
+    ):
+        value = str(getattr(ds, keyword))
+        assert value != original, f"{keyword} survived de-identification"
+        assert value.startswith(_PYDICOM_ROOT), f"{keyword} not under remap root: {value}"
+    # SOP Class UID (standard root) is preserved so the object stays valid.
+    assert str(ds.SOPClassUID) == "1.2.840.10008.5.1.4.1.1.7"
+
+
+def test_deid_study_series_uids_deterministic_across_runs(runs):
+    _in_dir, results = runs
+    ds1, ds2 = _output_dicom(results, "run1"), _output_dicom(results, "run2")
+    assert str(ds1.StudyInstanceUID) == str(ds2.StudyInstanceUID)
+    assert str(ds1.SeriesInstanceUID) == str(ds2.SeriesInstanceUID)
 
 
 def test_deid_uid_deterministic_across_runs(runs):

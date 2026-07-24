@@ -22,7 +22,10 @@ that affect output are called out explicitly under **Changed**.
   command run an independent second pass over de-identified output, driven
   by a YAML checklist (`monai_aegis/checklists/ps315.yaml` by default) and
   reporting against `monai_aegis/schemas/verification.schema.json`.
-  Verification depends only on pydicom + PyYAML.
+  Verification depends only on pydicom + PyYAML. Includes an
+  `instance_uids_remapped` check that flags any patient-linkable UID left
+  under an original institutional root, closing the loop on the UID-graph
+  remap below.
 - **Synthetic fixtures.** `monai_aegis.fixtures` and the `aegis-fixture`
   command generate deterministic fake DICOM/PNG/JPEG inputs (burnt-in text
   plus fake header identifiers) for exercising the pipeline without real
@@ -45,6 +48,18 @@ that affect output are called out explicitly under **Changed**.
   dataset UID. Downstream consumers that joined on an output file's UID from
   a prior release will see different (now stable) values; the ground-truth
   CSVs are unaffected — they always keyed on the original UID.
+- **Full UID-graph remap (PS3.15 action U).** Scrubbing now replaces *every*
+  patient-linkable UID — Study, Series, FrameOfReference, and any referenced
+  instance UID in nested sequences — not just SOP Instance UID. Previously
+  these passed through verbatim, leaving the original institution-issued
+  identifiers in the output and re-linkable to the source study. The remap is
+  deterministic and consistent: a UID reused across the object (e.g. a
+  ReferencedSOPInstanceUID) is rewritten to the same value everywhere, so
+  cross-references survive; slices sharing a Study/Series UID receive the same
+  replacement. Class- and implementation-identifying UIDs (SOP Class,
+  Transfer Syntax, Implementation Class) and anything under the DICOM standard
+  root are preserved so the object stays valid. Each remap is recorded in the
+  ground-truth tag report as an `action=REMAP` row.
 - The MCP server's result summarization now delegates to the shared
   `monai_aegis.envelope` implementation. Tool response shapes are unchanged.
 - Behavioral dependencies now carry upper version bounds (pydicom `<4`,
