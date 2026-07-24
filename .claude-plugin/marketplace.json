@@ -1,0 +1,14 @@
+{
+  "name": "aegis",
+  "owner": {
+    "name": "Lakshmi Mahabaleshwara",
+    "email": "lakshmi.mahabaleshwara@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "aegis",
+      "source": "./plugins/aegis",
+      "description": "Medical image de-identification: Aegis skill + MCP tools for removing PHI from DICOM/JPEG/PNG, batch jobs, run audits, and review-queue management."
+    }
+  ]
+}

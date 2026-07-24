@@ -8,6 +8,8 @@ Composes the de-identification transforms into MONAI Compose pipelines.
 - ``build_image_pipeline()`` — standard image mode (JPEG/PNG).
 - ``build_image_series_pipeline()`` — standard image volume mode (JPEG/PNG series).
 """
+from __future__ import annotations
+
 import os
 import torch
 import logging
@@ -26,13 +28,15 @@ from monai_aegis.transforms.metadata import ScrubDicomMetadatad
 logger = logging.getLogger(__name__)
 
 
-def _resolve_builder_context(config_path: str) -> Tuple[str, dict[str, Any], AegisFileSystem]:
+def _resolve_builder_context(
+    config_path: str, overlay_path: str | None = None
+) -> Tuple[str, dict[str, Any], AegisFileSystem]:
     """Resolve config path, load config, log device, and build filesystem once."""
     base_dir = os.path.dirname(os.path.abspath(__file__))
     if not os.path.isabs(config_path):
         config_path = os.path.join(base_dir, config_path)
 
-    config = load_config(config_path)
+    config = load_config(config_path, overlay_path=overlay_path)
 
     is_gpu = torch.cuda.is_available() or torch.backends.mps.is_available()
     logger.info("Device set to: %s", "GPU" if is_gpu else "CPU")
@@ -41,7 +45,12 @@ def _resolve_builder_context(config_path: str) -> Tuple[str, dict[str, Any], Aeg
     return config_path, config, fs
 
 
-def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str = './output', input_dir: str = '') -> Compose:
+def build_pipeline(
+    config_path: str = '../config/config.yaml',
+    output_dir: str = './output',
+    input_dir: str = '',
+    overlay_path: str | None = None,
+) -> Compose:
     """
     Build the Aegis de-identification pipeline.
 
@@ -54,11 +63,12 @@ def build_pipeline(config_path: str = '../config/config.yaml', output_dir: str =
     Args:
         config_path: Path to config.yaml.
         output_dir: Directory for de-identified output files.
+        overlay_path: Optional overlay YAML deep-merged onto the base config.
 
     Returns:
         A MONAI Compose pipeline ready for ``pipeline({"image": uri})``.
     """
-    _, config, fs = _resolve_builder_context(config_path)
+    _, config, fs = _resolve_builder_context(config_path, overlay_path)
     keys = ['image']
 
     return Compose([
@@ -93,6 +103,7 @@ def build_series_pipeline(
     config_path: str = '../config/config.yaml',
     output_dir: str = './output',
     input_dir: str = '',
+    overlay_path: str | None = None,
 ) -> Compose:
     """Build the Aegis series-aware de-identification pipeline.
 
@@ -114,7 +125,7 @@ def build_series_pipeline(
         A MONAI Compose pipeline ready for
         ``pipeline({"image": [path1, path2, ...]})``.
     """
-    _, config, fs = _resolve_builder_context(config_path)
+    _, config, fs = _resolve_builder_context(config_path, overlay_path)
     keys = ['image']
 
     return Compose([
@@ -140,6 +151,7 @@ def build_image_pipeline(
     output_dir: str = './output',
     input_dir: str = '',
     output_ext: str = '.png',
+    overlay_path: str | None = None,
 ) -> Compose:
     """Build the Aegis image-only de-identification pipeline.
 
@@ -160,7 +172,7 @@ def build_image_pipeline(
     Returns:
         A MONAI Compose pipeline ready for ``pipeline({"image": uri})``.
     """
-    _, config, fs = _resolve_builder_context(config_path)
+    _, config, fs = _resolve_builder_context(config_path, overlay_path)
     keys = ['image']
 
     return Compose([
@@ -180,6 +192,7 @@ def build_image_series_pipeline(
     output_dir: str = './output',
     input_dir: str = '',
     output_ext: str = '.png',
+    overlay_path: str | None = None,
 ) -> Compose:
     """Build the pipeline for a folder of standard images (JPEGs/PNGs).
 
@@ -195,7 +208,7 @@ def build_image_series_pipeline(
     Returns:
         A composed MONAI transform pipeline.
     """
-    _, config, fs = _resolve_builder_context(config_path)
+    _, config, fs = _resolve_builder_context(config_path, overlay_path)
     keys = ['image']
 
     return Compose([

@@ -1,6 +1,14 @@
+# Convenience list for quick environment setup. The authoritative,
+# version-bounded dependency set lives in monai_aegis/pyproject.toml —
+# prefer `pip install -e monai_aegis/` (or `pip install monai-aegis`).
+# The `mcp` extra (aegis-mcp server) and `cloud` extra (S3/GCS/Azure) are
+# opt-in there; mcp is listed here because the bundled server needs it.
 monai
+torch
 pydicom
 easyocr
+opencv-python
+numpy
 pillow
 pyyaml
 transformers

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lakshmi-mahabaleshwara/aegis/monai_aegis/schemas/verification.schema.json",
+  "title": "Aegis de-identification verification report",
+  "description": "PHI-free result of verifying a de-identified run directory against a checklist. Finding details reference tags, files, and counts only — never element values or report cell contents.",
+  "type": "object",
+  "required": ["report_version", "tool", "checklist", "run_dir", "status", "totals", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "report_version": {"type": "string", "const": "1.0"},
+    "tool": {"type": "string", "const": "monai-aegis"},
+    "checklist": {"type": "string"},
+    "run_dir": {"type": "string"},
+    "status": {"type": "string", "enum": ["pass", "fail"]},
+    "totals": {
+      "type": "object",
+      "required": ["files_checked", "checks_evaluated", "failures", "warnings"],
+      "additionalProperties": false,
+      "properties": {
+        "files_checked": {"type": "integer", "minimum": 0},
+        "checks_evaluated": {"type": "integer", "minimum": 0},
+        "failures": {"type": "integer", "minimum": 0},
+        "warnings": {"type": "integer", "minimum": 0}
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["check", "severity", "file", "detail"],
+        "additionalProperties": false,
+        "properties": {
+          "check": {"type": "string"},
+          "severity": {"type": "string", "enum": ["error", "warning"]},
+          "file": {"type": "string"},
+          "detail": {"type": "string"}
+        }
+      }
+    }
+  }
+}

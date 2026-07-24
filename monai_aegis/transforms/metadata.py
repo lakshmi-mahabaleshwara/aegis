@@ -96,6 +96,25 @@ class ScrubDicomMetadata(Transform):
         # only costs a recomputed hash, never an inconsistent mapping.
         self._uid_cache: Dict[str, str] = {}
 
+    def remap_uid(self, original_uid: str, fallback_entropy: str = "") -> str:
+        """Deterministically remap a DICOM UID from the tokenization salt.
+
+        Same original UID + same salt → same de-identified UID, across
+        slices, files, and runs — the re-linkage contract that identity
+        tokens already honor, extended to UIDs. When the source carries no
+        UID, *fallback_entropy* (e.g. the file path) keys the mapping; with
+        neither, a random UID preserves uniqueness at the cost of
+        repeat-run stability for that degenerate input.
+        """
+        source = str(original_uid or "").strip() or str(fallback_entropy or "").strip()
+        if not source:
+            return pydicom.uid.generate_uid()
+        cached = self._uid_cache.get(source)
+        if cached is None:
+            cached = pydicom.uid.generate_uid(entropy_srcs=[self._uid_salt or "", source])
+            self._uid_cache[source] = cached
+        return cached
+
     @staticmethod
     def _parse_hex_part(s: str) -> int:
         """Parse one DICOM tag group/element string as a hex integer.
@@ -343,6 +362,9 @@ class ScrubDicomMetadata(Transform):
         else:
             ds = pydicom.dcmread(uri)
 
+        # Captured before scrubbing: keys the deterministic UID remap.
+        original_sop_uid = str(getattr(ds, 'SOPInstanceUID', ''))
+
         # Per-call audit trail, owned by this invocation.
         tag_actions: list = []
 
@@ -402,7 +424,15 @@ class ScrubDicomMetadata(Transform):
             ds.WindowCenter = str((p_max + p_min) / 2)
             ds.WindowWidth = str(p_max - p_min)
 
-        # 3. De-identification attestation (PS3.15) — stamped last so the
+        # 3. Regenerate the SOP Instance UID (PS3.15: replaced, not kept).
+        #    Deterministic from (salt, original UID) so identical inputs
+        #    reproduce identical outputs — see :meth:`remap_uid`. file_meta
+        #    is kept in sync so the output stays a valid DICOM Part 10 file.
+        ds.SOPInstanceUID = self.remap_uid(original_sop_uid, fallback_entropy=uri)
+        if hasattr(ds, 'file_meta') and ds.file_meta is not None:
+            ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+
+        # 4. De-identification attestation (PS3.15) — stamped last so the
         #    scrub pass can never remove the attestation attributes.
         self._stamp_attestation(ds, pixel_redacted=pixel_data is not None,
                                 tag_actions=tag_actions)
@@ -544,7 +574,6 @@ class ScrubDicomMetadatad(MapTransform):
             pixel_data=pixel_data.astype(dataset.pixel_array.dtype),
             dataset=dataset,
         )
-        scrubbed_ds.SOPInstanceUID = pydicom.uid.generate_uid()
         d[ck(key, ckeys.SCRUBBED_DS)] = scrubbed_ds
         d[ck(key, ckeys.TAG_ACTIONS)] = tag_actions
 
@@ -681,9 +710,6 @@ class ScrubDicomMetadatad(MapTransform):
             # Restore geometry tags
             for tag_name, val in saved_geometry.items():
                 setattr(scrubbed_ds, tag_name, val)
-
-            # Regenerate SOPInstanceUID for uniqueness
-            scrubbed_ds.SOPInstanceUID = pydicom.uid.generate_uid()
 
             scrubbed_datasets.append(scrubbed_ds)
             tag_actions_per_slice.append(slice_tag_actions)

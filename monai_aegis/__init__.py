@@ -16,4 +16,16 @@ try:
 except Exception:  # not installed (e.g. running from a source checkout)
     __version__ = "0.0.0+unknown"
 
-__all__ = ["config", "transforms", "__version__"]
+# Submodules that make up the public surface. The skill-facing entry points
+# (api, envelope, verify, fixtures) are imported on demand rather than at
+# package import, so ``import monai_aegis`` stays cheap (no torch/easyocr).
+__all__ = [
+    "config",
+    "transforms",
+    "api",
+    "envelope",
+    "verify",
+    "fixtures",
+    "reporting",
+    "__version__",
+]

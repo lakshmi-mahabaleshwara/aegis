@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import aegis_mcp_server as server
+from monai_aegis import mcp_server as server
 
 
 PHI_TEXT = "John Doe 1985-03-04"

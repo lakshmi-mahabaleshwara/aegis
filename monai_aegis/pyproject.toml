@@ -4,65 +4,85 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "monai-aegis"
-version = "0.1.0"
-description = "MONAI-based medical image de-identification pipeline with OCR and metadata scrubbing"
+version = "0.2.0"
+description = "MONAI-based medical image de-identification pipeline with OCR, metadata scrubbing, and an agent-skill surface"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [
-    {name = "Aegis Team"},
+    {name = "Lakshmi Mahabaleshwara", email = "lakshmi.mahabaleshwara@gmail.com"},
 ]
-keywords = ["monai", "medical-imaging", "de-identification", "dicom", "phi", "ocr"]
+keywords = ["monai", "medical-imaging", "de-identification", "dicom", "phi", "ocr", "hipaa", "agent-skill"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Healthcare Industry",
     "License :: OSI Approved :: Apache Software License",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
+# Upper bounds guard the next major of the dependencies whose behavior
+# shapes Aegis output. pydicom is capped below 4 because the current save
+# path uses write_like_original, which pydicom 4 removes.
 dependencies = [
-    "monai>=1.0.0",
+    "monai>=1.0.0,<2",
     "torch>=1.13.0",
-    "pydicom>=2.3.0",
-    "easyocr>=1.6.0",
+    "pydicom>=2.3.0,<4",
+    "easyocr>=1.6.0,<2",
     "opencv-python>=4.7.0",
     "numpy>=1.21.0",
     "pyyaml>=6.0",
     "pillow>=9.0.0",
-    "transformers>=4.0.0",
+    "transformers>=4.30.0,<6",
 ]
 
 [project.optional-dependencies]
+# Cloud storage backends for the fsspec-driven storage layer (AEGIS_STORAGE_PROTOCOL).
+cloud = [
+    "s3fs",
+    "gcsfs",
+    "adlfs",
+]
+# Model Context Protocol server (aegis_mcp_server.py).
+mcp = [
+    "mcp[cli]>=1.0.0",
+]
 dev = [
     "pytest>=7.0.0",
     "black>=22.0.0",
     "flake8>=4.0.0",
     "mypy>=1.0.0",
     "pre-commit>=3.0.0",
+    "jsonschema>=4.0",
+    "build>=1.0.0",
+    "twine>=4.0.0",
 ]
 
 [project.scripts]
 aegis-pipeline = "monai_aegis.cli:main"
+aegis-deidentify = "monai_aegis.skill_cli:main"
+aegis-verify = "monai_aegis.verify_cli:main"
+aegis-fixture = "monai_aegis.fixtures:main"
+aegis-mcp = "monai_aegis.mcp_server:main"
 
 [project.urls]
-Homepage = "https://github.com/aegis-team/monai-aegis"
-Documentation = "https://github.com/aegis-team/monai-aegis#readme"
-Repository = "https://github.com/aegis-team/monai-aegis"
-Issues = "https://github.com/aegis-team/monai-aegis/issues"
+Homepage = "https://github.com/lakshmi-mahabaleshwara/aegis"
+Documentation = "https://github.com/lakshmi-mahabaleshwara/aegis#readme"
+Repository = "https://github.com/lakshmi-mahabaleshwara/aegis"
+Issues = "https://github.com/lakshmi-mahabaleshwara/aegis/issues"
 
 [tool.setuptools]
-packages = ["monai_aegis", "monai_aegis.transforms", "monai_aegis.config"]
+packages = ["monai_aegis", "monai_aegis.transforms", "monai_aegis.config", "monai_aegis.schemas", "monai_aegis.checklists"]
 
 [tool.setuptools.package-dir]
 monai_aegis = "."
 
 [tool.setuptools.package-data]
 "monai_aegis.config" = ["*.yaml"]
+"monai_aegis.schemas" = ["*.json"]
+"monai_aegis.checklists" = ["*.yaml"]
 
 [tool.black]
 line-length = 120

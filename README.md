@@ -119,6 +119,22 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -e monai_aegis/
 ```
 
+Optional extras:
+
+```bash
+pip install -e "monai_aegis/[mcp]"     # aegis-mcp server (Model Context Protocol)
+pip install -e "monai_aegis/[cloud]"   # S3 / GCS / Azure storage backends
+pip install -e "monai_aegis/[dev]"     # tests, linters, build tooling
+```
+
+Installing registers the console commands `aegis-pipeline` (batch runner),
+`aegis-deidentify` (single-invocation skill surface), `aegis-verify`
+(independent verification), and `aegis-fixture` (synthetic test data); the
+`[mcp]` extra adds `aegis-mcp` (the MCP server). See
+[Skill Surface](#-skill-surface--single-command-de-identification-verification-fixtures)
+below, and [docs/skills/](docs/skills/) for wrapping Aegis as an agent skill
+in any ecosystem.
+
 ---
 
 ## 🚀 Quick Start
@@ -415,15 +431,77 @@ pixel_rows, tag_rows = reporting.extract_records(result)   # CSV-ready dict rows
 
 ---
 
+## 🛡️ Skill Surface — Single-Command De-identification, Verification, Fixtures
+
+Three console commands expose the pipeline as a scriptable, agent-friendly
+surface. Behavior stays config-driven — the flags identify the invocation;
+customization happens in YAML overlays, never code.
+
+```bash
+# De-identify a file or directory → PHI-free JSON envelope on stdout
+aegis-deidentify /path/to/input --output-dir /path/to/out
+
+# Independently verify a de-identified run against a checklist
+aegis-verify /path/to/out
+
+# Generate a synthetic fixture (fake burnt-in text + fake header PHI)
+aegis-fixture demo.dcm --text "SYNTHETIC PATIENT" --text "ID SYN-0001"
+```
+
+**`aegis-deidentify`** writes artifacts and ground-truth reports directly
+into `--output-dir` (no timestamped nesting) and emits exactly one JSON
+envelope on stdout (schema: `monai_aegis/schemas/envelope.schema.json`;
+logs go to stderr). Exit codes: `0` success · `1` failed · `2` bad
+invocation · `3` partial (some files failed) · `4` success but files were
+routed to manual review. The packaged skill overlay
+(`monai_aegis/config/config.skill.yaml`) applies by default; replace it
+with `--overlay your.yaml` or `AEGIS_CONFIG_OVERRIDE`. With a fixed
+`AEGIS_TOKEN_SALT`, identical inputs reproduce byte-identical outputs —
+tokens **and** regenerated DICOM UIDs are deterministic.
+
+**`aegis-verify`** is the second pass that checks the claim, not the exit
+code: it re-opens the output DICOMs and reports and asserts the
+de-identification guarantees — attestation stamps, tokenized identifiers,
+removed/zeroed PHI tags, no private tags, PHI-free report shape, and that
+every output is accounted for in the tag report. The assertions are a YAML
+checklist (`monai_aegis/checklists/ps315.yaml` by default) validated at
+load time; sites with a custom `pii_mapping` supply a matching checklist
+via `--checklist`. Exit codes: `0` pass · `1` could not run · `2` bad
+invocation · `3` checks failed. Verification needs only pydicom + PyYAML —
+no OCR/NER models — so audits can run anywhere.
+
+**`aegis-fixture`** generates deliberately fake inputs (parameterized size,
+burnt-in lines, header values) so any harness can exercise the full
+pipeline — and the verification loop — without real data. Generation is
+deterministic: same arguments, same bytes.
+
+The same functionality is available as library calls:
+`monai_aegis.api.deidentify(...)`, `monai_aegis.verify.verify_run(...)`,
+and `monai_aegis.fixtures.make_synthetic_dicom(...)`.
+
+---
+
 ## 🤖 MCP Server (AI-Agent Interface)
 
-`aegis_mcp_server.py` exposes the pipeline as six [Model Context Protocol](https://modelcontextprotocol.io)
-tools so an orchestrating model — Claude Desktop, MCP Inspector, or a local
-Ollama model behind mcpo/Open WebUI — can run, monitor, and audit
-de-identification through natural language. **No PHI ever enters a model
-context window**: tool responses carry only file names, paths, counts,
-decision categories, tag keywords/actions, timings, and job states — never
-pixel data, OCR text, text tokens, or DICOM tag values.
+The MCP server (`monai_aegis.mcp_server`) exposes the pipeline as six
+[Model Context Protocol](https://modelcontextprotocol.io) tools so an
+orchestrating model — Claude Desktop, MCP Inspector, or a local Ollama model
+behind mcpo/Open WebUI — can run, monitor, and audit de-identification
+through natural language. **No PHI ever enters a model context window**: tool
+responses carry only file names, paths, counts, decision categories, tag
+keywords/actions, timings, and job states — never pixel data, OCR text, text
+tokens, or DICOM tag values.
+
+Install and launch:
+
+```bash
+pip install 'monai-aegis[mcp]'   # ships the server with the package
+aegis-mcp                         # console command (stdio transport)
+```
+
+The root script `aegis_mcp_server.py` remains as a thin launcher, so
+`python aegis_mcp_server.py` and existing client configs that reference that
+path keep working.
 
 | Tool | Purpose |
 |------|---------|
@@ -477,6 +555,28 @@ limits, batch modes) live in `monai_aegis/config/mcp_server_config.py`.
 Environment: `AEGIS_ROOT` (defaults to the repo root) and `AEGIS_DEVICE`
 (`cpu`/`mps`/`cuda`, consumed by the NER config).
 
+### Claude Code Plugin (Agent Skill + MCP)
+
+This repository doubles as a [Claude Code plugin marketplace](https://docs.anthropic.com/en/docs/claude-code/plugins).
+The `aegis` plugin bundles an **agent skill** (`aegis-deid`, teaching Claude
+the de-identification workflow, CLI fallback, and PHI-handling guardrails)
+and an **MCP registration** for `aegis_mcp_server.py`.
+
+```bash
+# 1. Point the plugin's MCP config at your Aegis checkout (add to your shell profile)
+export AEGIS_ROOT=/path/to/aegis        # must contain venv/ with monai_aegis installed
+export AEGIS_DEVICE=mps                  # optional: cpu (default) / mps / cuda
+
+# 2. Inside Claude Code:
+#    /plugin marketplace add lakshmi-mahabaleshwara/aegis
+#    /plugin install aegis@aegis
+```
+
+Installing the plugin registers the six MCP tools above in Claude Code and
+enables the skill for natural-language use ("de-identify this DICOM folder").
+This is independent of Claude Desktop — an existing `claude_desktop_config.json`
+entry keeps working unchanged, and each client spawns its own server process.
+
 ---
 
 ## 🧪 Testing
@@ -503,14 +603,23 @@ aegis/
 ├── monai_aegis/                      # Installable package
 │   ├── pyproject.toml                # PEP 621 package config
 │   ├── cli.py                        # aegis-pipeline entry point
+│   ├── api.py                        # deidentify() — single-invocation skill facade
+│   ├── skill_cli.py                  # aegis-deidentify entry point
+│   ├── envelope.py                   # PHI-free result envelope builder (shared surface)
+│   ├── verify.py                     # Declarative checklist verification engine
+│   ├── verify_cli.py                 # aegis-verify entry point
+│   ├── fixtures.py                   # aegis-fixture — synthetic test-data generator
 │   ├── dicom_runner.py               # Packaged DICOM orchestration
 │   ├── image_runner.py               # Packaged image orchestration
 │   ├── reporting.py                  # Ground-truth CSV reporting (detections + tag actions)
 │   ├── config/
 │   │   ├── config.yaml               # De-identification + NER + storage + series settings
+│   │   ├── config.skill.yaml         # Skill-mode overlay (deterministic, flat output)
 │   │   ├── config_loader.py          # Env var interpolation + overlay merging
 │   │   ├── mcp_server_config.py      # aegis-mcp paths, limits, and FastMCP instance
 │   │   └── storage.py                # AegisFileSystem (fsspec wrapper)
+│   ├── schemas/                      # JSON Schemas: envelope + verification report
+│   ├── checklists/                   # Verification checklists (ps315.yaml default)
 │   └── transforms/
 │       ├── __init__.py                # Public API exports
 │       ├── context_keys.py            # Central registry of inter-transform data-dict keys
@@ -544,8 +653,10 @@ aegis/
 ├── run_dicom_pipeline.py              # Compatibility wrapper for monai_aegis.dicom_runner
 ├── run_image_pipeline.py              # Compatibility wrapper for monai_aegis.image_runner
 ├── run_pipeline.py                    # Compatibility wrapper for monai_aegis.cli
-├── aegis_mcp_server.py                # MCP server exposing the pipeline to AI agents
+├── aegis_mcp_server.py                # Thin launcher → monai_aegis.mcp_server (aegis-mcp)
 ├── aegis_demo.ipynb                   # Interactive walkthrough notebook
+├── docs/skills/                       # Skill kit: adapter contract, SKILL template, disclaimer
+├── CHANGELOG.md                       # Release history (semantic versioning)
 ├── Dockerfile                         # Container build
 ├── staging_input/                     # Input files (not tracked)
 ├── staging_output/                    # Processed output (not tracked)

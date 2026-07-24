@@ -1,0 +1,7 @@
+# Ensure non-Python data files ship in the source distribution (sdist).
+# Wheels get these via [tool.setuptools.package-data] in pyproject.toml;
+# this covers the sdist path as well.
+include config/*.yaml
+include schemas/*.json
+include checklists/*.yaml
+include README.md

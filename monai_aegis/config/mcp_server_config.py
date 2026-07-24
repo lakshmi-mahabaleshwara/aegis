@@ -9,8 +9,10 @@ CONFIG_PATH = AEGIS_ROOT / "monai_aegis" / "config" / "config.yaml"
 REVIEW_DIR = AEGIS_ROOT / "staging_not_processed"
 DEFAULT_OUTPUT_DIR = AEGIS_ROOT / "staging_output" / "mcp"
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
-PIXEL_DECISIONS = ("redacted", "safelisted", "low_confidence")
+# Canonical values live with the shared skill surface; re-exported here so
+# the server keeps a single import site for its constants.
+from monai_aegis.api import IMAGE_EXTENSIONS  # noqa: F401
+from monai_aegis.envelope import PIXEL_DECISIONS  # noqa: F401
 # Batch discovery modes — aligned with the unified CLI (monai_aegis.cli):
 # 'auto' covers both DICOM and standard images, and is the default there too.
 BATCH_MODES = ("auto", "dicom", "image")
