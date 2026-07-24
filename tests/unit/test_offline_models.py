@@ -56,7 +56,10 @@ class TestNerModelPinning(unittest.TestCase):
             _ = classifier.pipeline
         kwargs = mock_hf.call_args[1]
         self.assertEqual(kwargs['revision'], 'abc123def456')
-        self.assertEqual(kwargs['model_kwargs'], {'local_files_only': False})
+        # local_files_only must NOT be forwarded via model_kwargs — transformers
+        # >= 5 sets it itself and a duplicate raises "got multiple values for
+        # keyword argument 'local_files_only'". Offline is driven by env vars.
+        self.assertNotIn('local_files_only', kwargs.get('model_kwargs', {}))
 
     def test_empty_revision_floats_on_default_branch(self):
         classifier = PHIClassifier(self._config(model_revision=''))
@@ -65,13 +68,9 @@ class TestNerModelPinning(unittest.TestCase):
     def test_shipped_config_pins_the_revision(self):
         # The packaged config.yaml must carry an explicit revision pin so
         # deployments never float on the model repo's default branch.
+        from monai_aegis.api import default_config_path
         from monai_aegis.config.config_loader import load_config
-        import os
-        config_path = os.path.join(
-            os.path.dirname(__file__), '..', '..',
-            'monai_aegis', 'config', 'config.yaml',
-        )
-        classifier = PHIClassifier(load_config(config_path))
+        classifier = PHIClassifier(load_config(default_config_path()))
         self.assertIsNotNone(classifier.model_revision)
         self.assertNotIn('${', classifier.model_revision)
 
@@ -83,11 +82,11 @@ class TestNerModelPinning(unittest.TestCase):
             os.environ.pop('TRANSFORMERS_OFFLINE', None)
             with patch('transformers.pipeline', return_value=MagicMock()) as mock_hf:
                 _ = classifier.pipeline
+            # Offline is enforced through the env vars, not a model_kwargs flag.
             self.assertEqual(os.environ.get('HF_HUB_OFFLINE'), '1')
             self.assertEqual(os.environ.get('TRANSFORMERS_OFFLINE'), '1')
-            self.assertEqual(
-                mock_hf.call_args[1]['model_kwargs'],
-                {'local_files_only': True},
+            self.assertNotIn(
+                'local_files_only', mock_hf.call_args[1].get('model_kwargs', {})
             )
 
 

@@ -17,9 +17,14 @@ IMAGE_NAME="monai_aegis"
 IMAGE_TAG="test"
 FULL_IMAGE="${IMAGE_NAME}:${IMAGE_TAG}"
 
-# Step 1: Build Docker Image
+# Resolve the repository root from this script's location so the build and
+# volume mounts work regardless of the current working directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Step 1: Build Docker Image (context = repo root, Dockerfile under docker/)
 echo -e "${YELLOW}Step 1: Building Docker image...${NC}"
-docker build -t ${FULL_IMAGE} . || {
+docker build -f "${REPO_ROOT}/docker/Dockerfile" -t ${FULL_IMAGE} "${REPO_ROOT}" || {
     echo -e "${RED}✗ Docker build failed${NC}"
     exit 1
 }
@@ -47,15 +52,15 @@ echo -e "${GREEN}✓ Integration tests passed${NC}"
 echo ""
 
 # Step 4: Run Pipeline on Test Data (if present)
-if [ -d "staging_input" ] && [ "$(ls -A staging_input)" ]; then
+if [ -d "${REPO_ROOT}/staging_input" ] && [ "$(ls -A "${REPO_ROOT}/staging_input")" ]; then
     echo -e "${YELLOW}Step 4: Running pipeline on staging_input/...${NC}"
-    
+
     # Create output directory if it doesn't exist
-    mkdir -p staging_output
-    
+    mkdir -p "${REPO_ROOT}/staging_output"
+
     docker run --rm \
-        -v "$(pwd)/staging_input:/app/staging_input:ro" \
-        -v "$(pwd)/staging_output:/app/staging_output" \
+        -v "${REPO_ROOT}/staging_input:/app/staging_input:ro" \
+        -v "${REPO_ROOT}/staging_output:/app/staging_output" \
         ${FULL_IMAGE} || {
         echo -e "${RED}✗ Pipeline execution failed${NC}"
         exit 1

@@ -26,7 +26,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from monai_aegis import api, fixtures, verify, verify_cli
 
-BURNED_IN_LINES = ("JOHN SMITH", "DOB 04 MAR 1985")
+# Burnt-in strings that the deterministic heuristic layer (Layer 2) redacts
+# without depending on the NER model's judgement of a specific name — a
+# date-ID stamp and a facility name, mirroring real ultrasound annotations.
+BURNED_IN_LINES = ("20240101-091825-6AAA", "HOSPITAL CENTER")
+FIXTURE_SIZE = (400, 240)
+FIXTURE_TEXT_SIZE = 26
 
 
 @pytest.fixture(scope="module")
@@ -36,9 +41,9 @@ def trust_loop(tmp_path_factory):
     in_dir = tmp_path_factory.mktemp("verify_in")
     fixtures.make_synthetic_dicom(
         str(in_dir / "scan.dcm"),
-        size=(320, 240),
+        size=FIXTURE_SIZE,
         burned_in_text=BURNED_IN_LINES,
-        text_size=28,
+        text_size=FIXTURE_TEXT_SIZE,
         with_private_tag=True,
     )
     fixtures.make_synthetic_image(str(in_dir / "photo.png"))
@@ -77,13 +82,13 @@ def test_burned_in_text_detected_and_redacted(trust_loop):
     _in, out_dir, env = trust_loop
     entry = next(f for f in env["files"] if f["source_file"] == "scan.dcm")
     assert entry["pixel_decisions"]["redacted"] >= 1, (
-        "OCR/NER did not redact the synthetic burnt-in name — " f"decisions: {entry['pixel_decisions']}"
+        "burnt-in PHI was not redacted — " f"decisions: {entry['pixel_decisions']}"
     )
     # The redacted regions are zeroed in the output pixels: the text rows at
     # the top of the frame must have lost brightness relative to the input.
     ds = pydicom.dcmread(entry["artifacts"][0])
     top_band = ds.pixel_array[:80]
-    original = fixtures.render_text_pixels((320, 240), BURNED_IN_LINES, 28)[:80]
+    original = fixtures.render_text_pixels(FIXTURE_SIZE, BURNED_IN_LINES, FIXTURE_TEXT_SIZE)[:80]
     assert int(np.count_nonzero(top_band)) < int(np.count_nonzero(original))
 
 

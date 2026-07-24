@@ -1,11 +1,12 @@
 """
-Package-local DICOM pipeline runner.
+Package-local standard image pipeline runner.
 """
 import argparse
 import logging
 import os
 import shutil
 import traceback
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable
@@ -17,15 +18,14 @@ from monai_aegis.config.config_loader import load_config
 from monai_aegis.config.storage import AegisFileSystem
 from monai_aegis.transforms import context_keys as ckeys
 from monai_aegis.transforms.context_keys import ck
-from monai_aegis.transforms.discovery import (
-    discover_dicoms,
-    group_into_series,
-    sort_slices,
-    validate_series,
-)
-from monai_aegis.transforms.pipeline import build_pipeline, build_series_pipeline
+from monai_aegis.transforms.discovery import discover_images
+from monai_aegis.transforms.pipeline import build_image_pipeline, build_image_series_pipeline
 
 logger = logging.getLogger(__name__)
+
+# The config shipped with the package — resolved from this file's location so
+# the default works regardless of the working directory or install layout.
+DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "config.yaml")
 
 
 @dataclass
@@ -134,10 +134,16 @@ def _resolve_file_path(data_dict: dict[str, Any]) -> str:
     return str(file_path)
 
 
-def _quarantine_file(file_path: str, paths: RunnerPaths, reason: str) -> None:
+def _resolve_rel_path(data_dict: dict[str, Any], paths: RunnerPaths, file_path: str) -> str:
+    rel_path = data_dict.get("rel_path")
+    if rel_path:
+        return rel_path
+    return os.path.relpath(file_path, paths.pipeline_input_dir)
+
+
+def _quarantine_file(file_path: str, rel_path: str, paths: RunnerPaths, reason: str) -> None:
     if not isinstance(file_path, str) or file_path == "unknown":
         return
-    rel_path = os.path.relpath(file_path, paths.pipeline_input_dir)
     dest = os.path.join(paths.not_processed_dir, rel_path)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     try:
@@ -150,16 +156,15 @@ def _quarantine_file(file_path: str, paths: RunnerPaths, reason: str) -> None:
 def _quarantine_many(files: Iterable[str], paths: RunnerPaths, reason: str) -> None:
     for file_path in files:
         if isinstance(file_path, str):
-            _quarantine_file(file_path, paths, reason)
+            rel_path = os.path.relpath(file_path, paths.pipeline_input_dir)
+            _quarantine_file(file_path, rel_path, paths, reason)
 
 
-def _cleanup_output(data_dict: dict[str, Any], paths: RunnerPaths, file_path: str) -> None:
-    rel_path = os.path.relpath(file_path, paths.pipeline_input_dir)
-    filename = os.path.basename(file_path)
-    saved_key = ck("image", ckeys.SAVED_PATH)
-    out_path = data_dict.get(saved_key, os.path.join(paths.output_dir, filename))
-    if out_path == os.path.join(paths.output_dir, filename):
-        out_path = data_dict.get(saved_key, os.path.join(paths.output_dir, rel_path))
+def _cleanup_output(data_dict: dict[str, Any], paths: RunnerPaths, rel_path: str) -> None:
+    out_path = data_dict.get(ck("image", ckeys.SAVED_PATH))
+    if not out_path:
+        filename = os.path.basename(rel_path)
+        out_path = os.path.join(paths.output_dir, filename.rsplit(".", 1)[0] + ".png")
     if os.path.exists(out_path):
         os.remove(out_path)
 
@@ -172,7 +177,9 @@ def _handle_error_result(data_dict: dict[str, Any], paths: RunnerPaths, summary:
     if isinstance(image_value, list):
         _quarantine_many(image_value, paths, reason)
     else:
-        _quarantine_file(_resolve_file_path(data_dict), paths, reason)
+        file_path = _resolve_file_path(data_dict)
+        rel_path = _resolve_rel_path(data_dict, paths, file_path)
+        _quarantine_file(file_path, rel_path, paths, reason)
     return True
 
 
@@ -185,30 +192,26 @@ def _handle_single_result(
     file_path = _resolve_file_path(data_dict)
     if file_path == "unknown":
         return
-
+    rel_path = _resolve_rel_path(data_dict, paths, file_path)
     stats_dict = data_dict.get(ck("image", ckeys.REDACTION_STATS), {})
     low_conf = stats_dict.get("low_confidence_count", 0)
 
     if low_conf > 0:
-        _quarantine_file(file_path, paths, "NOT PROCESSED")
-        _cleanup_output(data_dict, paths, file_path)
+        _quarantine_file(file_path, rel_path, paths, "NOT PROCESSED")
+        _cleanup_output(data_dict, paths, rel_path)
         summary.not_processed += 1
         return
 
-    out_path = data_dict.get(ck("image", ckeys.SAVED_PATH), os.path.join(paths.output_dir, os.path.basename(file_path)))
-    if os.path.exists(out_path):
-        logger.info("Saved DICOM -> %s", out_path)
-        if count_as_processed == "processed":
-            summary.processed += 1
-        else:
-            summary.slices += 1
+    logger.info("Processed: %s", rel_path)
+    if count_as_processed == "processed":
+        summary.processed += 1
     else:
-        logger.warning("Output DICOM not found for %s", os.path.basename(file_path))
+        summary.slices += 1
 
 
 def _log_single_summary(summary: RunSummary) -> None:
     logger.info(
-        "Single-file DICOM complete. Processed: %d | Not processed: %d | Errors: %d",
+        "Single-file image processing complete. Processed: %d | Not processed: %d | Errors: %d",
         summary.processed,
         summary.not_processed,
         summary.errors,
@@ -217,7 +220,7 @@ def _log_single_summary(summary: RunSummary) -> None:
 
 def _log_series_summary(summary: RunSummary) -> None:
     logger.info(
-        "DICOM series processing complete. Series: %d | Slices: %d | Errors: %d",
+        "Image series processing complete. Folders: %d | Images: %d | Errors: %d",
         summary.series,
         summary.slices,
         summary.errors,
@@ -225,25 +228,40 @@ def _log_series_summary(summary: RunSummary) -> None:
 
 
 def run_single(config_path: str) -> None:
-    config, fs, paths = _build_runner_paths(config_path, "dicom_folder")
-    logger.info("Building single-file DICOM pipeline -> %s", paths.output_dir)
-    pipeline = build_pipeline(
+    config, fs, paths = _build_runner_paths(config_path, "image_folder")
+
+    image_files = []
+    walker = fs.walk(paths.pipeline_input_dir) if fs.protocol != "file" else os.walk(paths.pipeline_input_dir)
+    for root, _dirs, filenames in walker:
+        for filename in filenames:
+            if filename.lower().endswith((".jpg", ".jpeg", ".png")):
+                file_path = fs.join(root, filename) if fs.protocol != "file" else os.path.join(root, filename)
+                image_files.append(file_path)
+    image_files.sort()
+
+    if not image_files:
+        logger.warning("No image files found in %s", paths.pipeline_input_dir)
+        return
+
+    pipeline = build_image_pipeline(
         config_path=paths.config_path,
         output_dir=paths.output_dir,
         input_dir=paths.pipeline_input_dir,
     )
 
     summary = RunSummary()
-    report = reporting.GroundTruthAccumulator(config)
+    # JPEG/PNG inputs have no DICOM tags — skip the tag-actions CSV.
+    report = reporting.GroundTruthAccumulator(config, include_tag_actions=False)
+    data_list = []
+    for file_path in image_files:
+        rel_path = os.path.relpath(file_path, paths.input_dir)
+        data_list.append({"image": file_path, "file_path": file_path, "rel_path": rel_path})
 
-    slices = discover_dicoms(paths.pipeline_input_dir, fs=fs)
-    data_list = [{"image": s.uri} for s in slices]
-
-    if not data_list:
-        logger.warning("No DICOM files found in %s", paths.input_dir)
-        return
-
-    for data_dict in _run_dataloader(data_list, pipeline, num_workers=0):
+    for data_dict in _run_dataloader(
+        data_list,
+        pipeline,
+        num_workers=paths.dataloader_num_workers,
+    ):
         report.collect(data_dict)
         if _handle_error_result(data_dict, paths, summary, "NOT PROCESSED (ERROR)"):
             continue
@@ -254,59 +272,72 @@ def run_single(config_path: str) -> None:
 
 
 def run_series(config_path: str) -> None:
-    config, fs, paths = _build_runner_paths(config_path, "dicom_folder")
+    config, fs, paths = _build_runner_paths(config_path, "image_folder")
 
-    logger.info("Discovering DICOM files in %s...", paths.pipeline_input_dir)
-    slices = discover_dicoms(paths.pipeline_input_dir, fs=fs)
-
-    if not slices:
-        logger.warning("No DICOM files found. Falling back to single-file mode.")
+    image_files = discover_images(paths.pipeline_input_dir, fs=fs)
+    if not image_files:
+        logger.warning("No image files found. Falling back to single-file mode.")
         run_single(paths.config_path)
         return
 
-    series_groups = group_into_series(slices)
+    folder_groups = defaultdict(list)
+    
+    # Use absolute paths for comparison since fsspec LocalFileSystem yields absolute paths
+    abs_input_dir = os.path.abspath(paths.pipeline_input_dir) if fs.protocol == "file" else paths.pipeline_input_dir.rstrip("/")
 
-    logger.info("Building series pipeline -> %s", paths.output_dir)
-    pipeline = build_series_pipeline(
+    for file_path in image_files:
+        parent_dir = fs.dirname(file_path) if fs.protocol != "file" else os.path.dirname(file_path)
+        
+        if fs.protocol == "file":
+            abs_parent = os.path.abspath(parent_dir)
+            is_root_file = (abs_parent == abs_input_dir)
+        else:
+            is_root_file = (parent_dir.rstrip("/") == abs_input_dir)
+        
+        if is_root_file:
+            # Files directly in the root input directory are treated as individual singletons
+            # Group them by their own file path so len(folder_images) == 1
+            folder_groups[file_path].append(file_path)
+        else:
+            folder_groups[parent_dir].append(file_path)
+
+    pipeline = build_image_series_pipeline(
         config_path=paths.config_path,
         output_dir=paths.output_dir,
         input_dir=paths.pipeline_input_dir,
+        output_ext=".png",
     )
-    pipeline_single = build_pipeline(
+    pipeline_single = build_image_pipeline(
         config_path=paths.config_path,
         output_dir=paths.output_dir,
         input_dir=paths.pipeline_input_dir,
+        output_ext=".png",
     )
 
     singletons_data = []
     series_data = []
-
-    for (study_uid, series_uid), series_slices in series_groups.items():
-        sub_series_list = validate_series(series_slices)
-        for sub_idx, sub_series in enumerate(sub_series_list):
-            sorted_series = sort_slices(sub_series)
-            uris = [s.uri for s in sorted_series]
-
-            label = series_uid
-            if len(sub_series_list) > 1:
-                label += f" (sub-{sub_idx})"
-
-            if len(uris) == 1:
-                singletons_data.append(
-                    {"image": uris[0], "label": label, "filename": os.path.basename(uris[0])}
-                )
-            else:
-                series_data.append(
-                    {
-                        "image": uris,
-                        "label": label,
-                        "num_slices": len(uris),
-                        "study_uid": study_uid[:8],
-                    }
-                )
+    for parent_dir, folder_images in folder_groups.items():
+        label = os.path.basename(parent_dir) if fs.protocol == "file" else fs.basename(parent_dir)
+        if len(folder_images) == 1:
+            rel_path = (
+                folder_images[0][len(paths.pipeline_input_dir):].lstrip("/")
+                if fs.protocol != "file"
+                else os.path.relpath(folder_images[0], paths.pipeline_input_dir)
+            )
+            singletons_data.append(
+                {
+                    "image": folder_images[0],
+                    "file_path": folder_images[0],
+                    "label": label,
+                    "rel_path": rel_path,
+                }
+            )
+        else:
+            series_data.append({"image": folder_images, "label": label, "num_slices": len(folder_images)})
 
     summary = RunSummary()
-    report = reporting.GroundTruthAccumulator(config)
+    # JPEG/PNG inputs have no DICOM tags — skip the tag-actions CSV.
+    report = reporting.GroundTruthAccumulator(config, include_tag_actions=False)
 
     if singletons_data:
         for data_dict in _run_dataloader(
@@ -332,22 +363,20 @@ def run_series(config_path: str) -> None:
 
             stats_dict = data_dict.get(ck("image", ckeys.REDACTION_STATS), {})
             strategy = stats_dict.get("volume_strategy", "unknown")
-            target_token = data_dict.get(ck("image", ckeys.TARGET_TOKEN))
-            out_msg = f"Token: {target_token}" if target_token else "Original structure"
             num_slices = data_dict.get("num_slices", 0)
 
             logger.info(
-                "Series %s complete: strategy=%s, redacted=%d | Output: %s",
+                "Folder %s complete: strategy=%s, redacted=%d",
                 label,
                 strategy,
                 stats_dict.get("redacted_count", 0),
-                out_msg,
             )
 
             summary.series += 1
             summary.slices += num_slices
 
     report.flush(paths.output_dir)
+
     _log_series_summary(summary)
 
 
@@ -358,10 +387,10 @@ def main() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    parser = argparse.ArgumentParser(description="Aegis DICOM De-identification Pipeline")
+    parser = argparse.ArgumentParser(description="Aegis Image De-identification Pipeline")
     parser.add_argument(
         "--config",
-        default="monai_aegis/config/config.yaml",
+        default=DEFAULT_CONFIG,
         help="Path to config.yaml",
     )
     parser.add_argument(

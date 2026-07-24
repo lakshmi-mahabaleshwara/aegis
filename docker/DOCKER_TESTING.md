@@ -4,7 +4,7 @@
 
 ### 1. Build the Docker Image
 ```bash
-docker build -t monai_aegis:latest .
+docker build -f docker/Dockerfile -t monai_aegis:latest .
 ```
 
 ### 2. Run the Pipeline
@@ -22,17 +22,17 @@ docker run --rm \
 
 **Standard build (CPU only):**
 ```bash
-docker build -t monai_aegis:latest .
+docker build -f docker/Dockerfile -t monai_aegis:latest .
 ```
 
 **Build with specific tag:**
 ```bash
-docker build -t monai_aegis:v1.0 .
+docker build -f docker/Dockerfile -t monai_aegis:v1.0 .
 ```
 
 **Build with no cache (clean build):**
 ```bash
-docker build --no-cache -t monai_aegis:latest .
+docker build --no-cache -f docker/Dockerfile -t monai_aegis:latest .
 ```
 
 ### Run Modes
@@ -50,7 +50,7 @@ docker run --rm \
 docker run --rm \
   -v "$(pwd)/staging_input:/app/staging_input:ro" \
   -v "$(pwd)/staging_output:/app/staging_output" \
-  -v "$(pwd)/custom_config.yaml:/app/monai_aegis/config/config.yaml:ro" \
+  -v "$(pwd)/custom_config.yaml:/app/src/monai_aegis/config/config.yaml:ro" \
   monai_aegis:latest
 ```
 
@@ -98,7 +98,7 @@ cp /path/to/test.jpg staging_input/
 
 ### Step 2: Build Image
 ```bash
-docker build -t monai_aegis:test .
+docker build -f docker/Dockerfile -t monai_aegis:test .
 ```
 
 ### Step 3: Run Pipeline
@@ -175,7 +175,7 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: Build Docker image
-        run: docker build -t monai_aegis:test .
+        run: docker build -f docker/Dockerfile -t monai_aegis:test .
       - name: Run tests
         run: docker run --rm monai_aegis:test python -m unittest discover /app/tests -v
 ```

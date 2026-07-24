@@ -116,15 +116,15 @@ cd aegis
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-pip install -e monai_aegis/
+pip install -e .
 ```
 
 Optional extras:
 
 ```bash
-pip install -e "monai_aegis/[mcp]"     # aegis-mcp server (Model Context Protocol)
-pip install -e "monai_aegis/[cloud]"   # S3 / GCS / Azure storage backends
-pip install -e "monai_aegis/[dev]"     # tests, linters, build tooling
+pip install -e ".[mcp]"     # aegis-mcp server (Model Context Protocol)
+pip install -e ".[cloud]"   # S3 / GCS / Azure storage backends
+pip install -e ".[dev]"     # tests, linters, build tooling
 ```
 
 Installing registers the console commands `aegis-pipeline` (batch runner),
@@ -142,19 +142,19 @@ in any ecosystem.
 ### Command-Line Runners
 ```bash
 # DICOM pipeline — series mode (default)
-python -m monai_aegis.dicom_runner --config monai_aegis/config/config.yaml
+python -m monai_aegis.dicom_runner --config src/monai_aegis/config/config.yaml
 
 # DICOM pipeline — single-file mode
-python -m monai_aegis.dicom_runner --config monai_aegis/config/config.yaml --mode single
+python -m monai_aegis.dicom_runner --config src/monai_aegis/config/config.yaml --mode single
 
 # Image pipeline — series mode (default)
-python -m monai_aegis.image_runner --config monai_aegis/config/config.yaml
+python -m monai_aegis.image_runner --config src/monai_aegis/config/config.yaml
 
 # Image pipeline — single-file mode
-python -m monai_aegis.image_runner --config monai_aegis/config/config.yaml --mode single
+python -m monai_aegis.image_runner --config src/monai_aegis/config/config.yaml --mode single
 
 # Unified orchestrator — runs both DICOM and Image pipelines
-aegis-pipeline --config monai_aegis/config/config.yaml --mode auto
+aegis-pipeline --config src/monai_aegis/config/config.yaml --mode auto
 
 # Output:
 #   Processed files → staging_output/dicom/<timestamp>/ or staging_output/image/<timestamp>/
@@ -165,7 +165,7 @@ aegis-pipeline --config monai_aegis/config/config.yaml --mode auto
 
 ## ⚙️ Configuration
 
-Edit `monai_aegis/config/config.yaml`. Supports `${VAR_NAME:default}` environment variable interpolation:
+Edit `src/monai_aegis/config/config.yaml`. Supports `${VAR_NAME:default}` environment variable interpolation:
 
 ```yaml
 paths:
@@ -273,7 +273,7 @@ paths:
 # Apply overlay via environment variable
 export AEGIS_CONFIG_OVERRIDE=config.prod.yaml
 pip install s3fs  # one-time
-python -m monai_aegis.dicom_runner --config monai_aegis/config/config.yaml
+python -m monai_aegis.dicom_runner --config src/monai_aegis/config/config.yaml
 ```
 
 | Backend | Protocol | Extra Package |
@@ -292,12 +292,12 @@ calls at runtime, not even update checks.
 
 ```bash
 # 1. On a connected machine (or Docker build stage): prefetch pinned weights
-python scripts/prefetch_models.py --config monai_aegis/config/config.yaml
+python scripts/prefetch_models.py --config src/monai_aegis/config/config.yaml
 
 # 2. Run fully offline
 export AEGIS_HF_OFFLINE=true        # NER: resolve from local HF cache only
 export AEGIS_MODEL_DOWNLOADS=false  # EasyOCR: never attempt a download
-aegis-pipeline --config monai_aegis/config/config.yaml
+aegis-pipeline --config src/monai_aegis/config/config.yaml
 ```
 
 | Env var | Config key | Effect |
@@ -418,10 +418,11 @@ Set `reporting.save_ground_truth: false` to skip CSV writing entirely and pull
 the same records from the pipeline data dict yourself:
 
 ```python
-from monai_aegis import reporting
+from monai_aegis import api, reporting
 from monai_aegis.transforms.pipeline import build_pipeline
 
-pipeline = build_pipeline(config_path="monai_aegis/config/config.yaml",
+# api.default_config_path() resolves the packaged config regardless of layout.
+pipeline = build_pipeline(config_path=api.default_config_path(),
                           output_dir="out", input_dir="in")
 result = pipeline({"image": "/path/to/file.dcm"})
 
@@ -600,67 +601,52 @@ python -m pytest tests/ -q
 
 ```
 aegis/
-├── monai_aegis/                      # Installable package
-│   ├── pyproject.toml                # PEP 621 package config
-│   ├── cli.py                        # aegis-pipeline entry point
-│   ├── api.py                        # deidentify() — single-invocation skill facade
-│   ├── skill_cli.py                  # aegis-deidentify entry point
-│   ├── envelope.py                   # PHI-free result envelope builder (shared surface)
-│   ├── verify.py                     # Declarative checklist verification engine
-│   ├── verify_cli.py                 # aegis-verify entry point
-│   ├── fixtures.py                   # aegis-fixture — synthetic test-data generator
-│   ├── dicom_runner.py               # Packaged DICOM orchestration
-│   ├── image_runner.py               # Packaged image orchestration
-│   ├── reporting.py                  # Ground-truth CSV reporting (detections + tag actions)
-│   ├── config/
-│   │   ├── config.yaml               # De-identification + NER + storage + series settings
-│   │   ├── config.skill.yaml         # Skill-mode overlay (deterministic, flat output)
-│   │   ├── config_loader.py          # Env var interpolation + overlay merging
-│   │   ├── mcp_server_config.py      # aegis-mcp paths, limits, and FastMCP instance
-│   │   └── storage.py                # AegisFileSystem (fsspec wrapper)
-│   ├── schemas/                      # JSON Schemas: envelope + verification report
-│   ├── checklists/                   # Verification checklists (ps315.yaml default)
-│   └── transforms/
-│       ├── __init__.py                # Public API exports
-│       ├── context_keys.py            # Central registry of inter-transform data-dict keys
-│       ├── io.py                      # LoadDicomRaw/d, SaveDicom/d, LoadImage/d, SaveImage/d
-│       ├── series_io.py               # LoadDicomSeries/d, SaveDicomSeries/d
-│       ├── discovery.py               # discover_dicoms, is_dicom_file, group/validate/sort
-│       ├── pixel.py                   # RedactPixelPHI/d (OCR + NER + volume keyframe + US mask scoping)
-│       ├── us_regions.py              # RedactByUSRegions/d (SequenceOfUltrasoundRegions fan-geometry masking)
-│       ├── ner_classifier.py          # PHIClassifier (Stanford NER wrapper)
-│       ├── metadata.py                # ScrubDicomMetadata/d (single + series scrub)
-│       ├── exceptions.py              # Custom exception hierarchy
-│       ├── utility.py                 # AegisIdentityManager + tokenized output path helpers
-│       └── pipeline.py                # build_pipeline / build_series_pipeline / build_image_pipeline / build_image_series_pipeline
+├── pyproject.toml                    # PEP 621 package config (src/ layout)
+├── MANIFEST.in                       # sdist data-file inclusion
+├── src/
+│   └── monai_aegis/                  # Installable package
+│       ├── cli.py                    # aegis-pipeline entry point
+│       ├── api.py                    # deidentify() — single-invocation skill facade
+│       ├── skill_cli.py              # aegis-deidentify entry point
+│       ├── envelope.py               # PHI-free result envelope builder (shared surface)
+│       ├── verify.py                 # Declarative checklist verification engine
+│       ├── verify_cli.py             # aegis-verify entry point
+│       ├── fixtures.py               # aegis-fixture — synthetic test-data generator
+│       ├── mcp_server.py             # aegis-mcp — Model Context Protocol server
+│       ├── dicom_runner.py           # Packaged DICOM orchestration
+│       ├── image_runner.py           # Packaged image orchestration
+│       ├── reporting.py              # Ground-truth CSV reporting (detections + tag actions)
+│       ├── config/
+│       │   ├── config.yaml           # De-identification + NER + storage + series settings
+│       │   ├── config.skill.yaml     # Skill-mode overlay (deterministic, flat output)
+│       │   ├── config_loader.py      # Env var interpolation + overlay merging
+│       │   ├── mcp_server_config.py  # aegis-mcp paths, limits, and FastMCP instance
+│       │   └── storage.py            # AegisFileSystem (fsspec wrapper)
+│       ├── schemas/                  # JSON Schemas: envelope + verification report
+│       ├── checklists/               # Verification checklists (ps315.yaml default)
+│       └── transforms/               # MONAI transforms (load/redact/scrub/save, pipeline)
 ├── tests/
-│   ├── unit/                          # Unit tests
-│   │   ├── test_config_loader.py      # Config loading, env vars, overlays
-│   │   ├── test_storage.py            # AegisFileSystem, fsspec, byte-stream round-trip
-│   │   ├── test_raw_loader.py         # DICOM + image loading transforms
-│   │   ├── test_discovery.py          # Discovery, grouping, validation, sorting
-│   │   ├── test_series_io.py          # Series load/save transforms
-│   │   ├── test_image_series_io.py    # Image series load/save + tokenization
-│   │   ├── test_volume_redaction.py   # Volume keyframe OCR
-│   │   ├── test_us_regions.py         # US region mask building + pipeline integration
-│   │   ├── test_mcp_server.py         # aegis-mcp tools, batch modes, PHI-free guard
-│   │   └── ...                        # Additional test files
-│   └── integration/                   # End-to-end tests
+│   ├── unit/                         # Unit tests
+│   └── integration/                  # End-to-end tests (models required)
 ├── scripts/
-│   ├── prefetch_models.py             # Download pinned model weights for offline/Docker builds
-│   ├── bench_aegis.py                 # Public-dataset benchmark runner
-│   └── prepare_pydicom_samples.py     # Benchmark dataset preparation
-├── run_dicom_pipeline.py              # Compatibility wrapper for monai_aegis.dicom_runner
-├── run_image_pipeline.py              # Compatibility wrapper for monai_aegis.image_runner
-├── run_pipeline.py                    # Compatibility wrapper for monai_aegis.cli
-├── aegis_mcp_server.py                # Thin launcher → monai_aegis.mcp_server (aegis-mcp)
-├── aegis_demo.ipynb                   # Interactive walkthrough notebook
-├── docs/skills/                       # Skill kit: adapter contract, SKILL template, disclaimer
-├── CHANGELOG.md                       # Release history (semantic versioning)
-├── Dockerfile                         # Container build
-├── staging_input/                     # Input files (not tracked)
-├── staging_output/                    # Processed output (not tracked)
-└── staging_not_processed/             # Low-confidence files for review (not tracked)
+│   ├── prefetch_models.py            # Download pinned model weights for offline/Docker builds
+│   ├── bench_aegis.py                # Public-dataset benchmark runner
+│   └── prepare_pydicom_samples.py    # Benchmark dataset preparation
+├── docker/
+│   ├── Dockerfile                    # Container build (build context = repo root)
+│   ├── DOCKER_TESTING.md             # Docker guide
+│   └── test_docker.sh                # Build + test-in-container script
+├── notebooks/
+│   └── aegis_demo.ipynb              # Interactive walkthrough notebook
+├── docs/skills/                      # Skill kit: adapter contract, SKILL template, disclaimer
+├── run_dicom_pipeline.py             # Compatibility wrapper for monai_aegis.dicom_runner
+├── run_image_pipeline.py             # Compatibility wrapper for monai_aegis.image_runner
+├── run_pipeline.py                   # Compatibility wrapper for monai_aegis.cli
+├── aegis_mcp_server.py               # Thin launcher → monai_aegis.mcp_server (aegis-mcp)
+├── CHANGELOG.md                      # Release history (semantic versioning)
+├── staging_input/                    # Input files (not tracked)
+├── staging_output/                   # Processed output (not tracked)
+└── staging_not_processed/            # Low-confidence files for review (not tracked)
 ```
 
 ---
@@ -699,8 +685,8 @@ except AegisTransformError as e:
 ## 🐳 Docker
 
 ```bash
-# Build
-docker build -t aegis:latest .
+# Build (Dockerfile lives under docker/; build context is the repo root)
+docker build -f docker/Dockerfile -t aegis:latest .
 
 # Run DICOM pipeline
 docker run --rm \
@@ -719,7 +705,7 @@ docker run --rm aegis:latest \
   python -m unittest discover /app/tests/unit -v
 ```
 
-See [DOCKER_TESTING.md](DOCKER_TESTING.md) for full Docker guide.
+See [docker/DOCKER_TESTING.md](docker/DOCKER_TESTING.md) for full Docker guide.
 
 ---
 
@@ -727,7 +713,7 @@ See [DOCKER_TESTING.md](DOCKER_TESTING.md) for full Docker guide.
 
 ```bash
 # Install dev dependencies
-pip install -e "monai_aegis/[dev]"
+pip install -e ".[dev]"
 
 # Format
 black monai_aegis/transforms/ tests/

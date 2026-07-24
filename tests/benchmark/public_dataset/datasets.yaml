@@ -200,6 +200,6 @@ datasets:
 # Defaults applied when running bench_aegis.py from the notebook unless
 # a per-dataset override is supplied.
 benchmark_defaults:
-  config: monai_aegis/config/config.yaml
+  config: src/monai_aegis/config/config.yaml
   output: tests/benchmark/results/
   mode: single

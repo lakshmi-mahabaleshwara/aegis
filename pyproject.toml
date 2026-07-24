@@ -73,11 +73,10 @@ Documentation = "https://github.com/lakshmi-mahabaleshwara/aegis#readme"
 Repository = "https://github.com/lakshmi-mahabaleshwara/aegis"
 Issues = "https://github.com/lakshmi-mahabaleshwara/aegis/issues"
 
-[tool.setuptools]
-packages = ["monai_aegis", "monai_aegis.transforms", "monai_aegis.config", "monai_aegis.schemas", "monai_aegis.checklists"]
-
-[tool.setuptools.package-dir]
-monai_aegis = "."
+# src/ layout: sources live under src/, so subpackages are auto-discovered
+# (no manual package list to keep in sync as the tree grows).
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.package-data]
 "monai_aegis.config" = ["*.yaml"]
@@ -86,16 +85,16 @@ monai_aegis = "."
 
 [tool.black]
 line-length = 120
-target-version = ["py38", "py39", "py310", "py311"]
+target-version = ["py310", "py311", "py312"]
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 
 [tool.pytest.ini_options]
-testpaths = ["../tests"]
+testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

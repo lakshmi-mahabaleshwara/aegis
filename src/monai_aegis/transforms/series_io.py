@@ -364,8 +364,13 @@ class SaveDicomSeries(Transform):
         """
         output_paths: List[str] = []
         for i, (ds, orig_fp) in enumerate(zip(datasets, original_uris)):
-            # Regenerate SOPInstanceUID for uniqueness
-            ds.SOPInstanceUID = pydicom.uid.generate_uid()
+            # SOPInstanceUID is regenerated deterministically upstream during
+            # metadata scrubbing (ScrubDicomMetadata.remap_uid). Persist it
+            # as-is and only keep the file-meta pointer in sync, so the output
+            # is a valid DICOM Part 10 object. Re-randomising here previously
+            # broke both file-meta consistency and cross-run determinism.
+            if getattr(ds, 'file_meta', None) is not None:
+                ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
 
             from monai_aegis.transforms.utility import build_output_path
             out_path = build_output_path(

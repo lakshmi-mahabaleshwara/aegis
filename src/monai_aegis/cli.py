@@ -3,12 +3,17 @@ Package-local unified CLI entrypoint.
 """
 import argparse
 import logging
+from pathlib import Path
 
 from monai_aegis.dicom_runner import run_series as run_dicom_series
 from monai_aegis.dicom_runner import run_single as run_dicom_single
 from monai_aegis.image_runner import run_series as run_image_series
 
 logger = logging.getLogger(__name__)
+
+# The config shipped with the package — resolved from this file's location so
+# the default works regardless of the working directory or install layout.
+DEFAULT_CONFIG = str(Path(__file__).resolve().parent / "config" / "config.yaml")
 
 
 def main() -> None:
@@ -21,7 +26,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Aegis De-identification Pipeline")
     parser.add_argument(
         "--config",
-        default="monai_aegis/config/config.yaml",
+        default=DEFAULT_CONFIG,
         help="Path to config.yaml",
     )
     parser.add_argument(

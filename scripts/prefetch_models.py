@@ -13,11 +13,11 @@ runtime so it can then run with zero network access:
 Typical uses::
 
     # Populate caches on a connected machine / in a Docker build stage
-    python scripts/prefetch_models.py --config monai_aegis/config/config.yaml
+    python scripts/prefetch_models.py --config src/monai_aegis/config/config.yaml
 
     # Then run fully offline:
     export AEGIS_HF_OFFLINE=true AEGIS_MODEL_DOWNLOADS=false
-    aegis-pipeline --config monai_aegis/config/config.yaml
+    aegis-pipeline --config src/monai_aegis/config/config.yaml
 
 For a portable bundle, set HF_HOME and --easyocr-dir to a directory you
 ship to the air-gapped host, and point AEGIS_OCR_MODEL_DIR/HF_HOME at it
@@ -77,7 +77,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--config",
-        default="monai_aegis/config/config.yaml",
+        default="src/monai_aegis/config/config.yaml",
         help="Path to config.yaml (source of model name, revision, languages)",
     )
     parser.add_argument(

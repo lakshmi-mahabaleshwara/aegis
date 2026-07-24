@@ -50,7 +50,7 @@ the registry path or target dir with `--registry` / `--target`; see
 ```bash
 python scripts/bench_aegis.py \
     --input  tests/benchmark/public_dataset/pydicom_samples \
-    --config monai_aegis/config/config.yaml \
+    --config src/monai_aegis/config/config.yaml \
     --output tests/benchmark/results/ \
     --mode   single
 ```

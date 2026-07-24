@@ -50,6 +50,16 @@ that affect output are called out explicitly under **Changed**.
 - Behavioral dependencies now carry upper version bounds (pydicom `<4`,
   monai `<2`, easyocr `<2`, transformers `<6`). Minimum supported Python is
   now 3.10.
+- **Repository restructure.** Sources moved to a `src/monai_aegis/` layout
+  with `pyproject.toml` at the repo root (subpackages are now auto-discovered
+  via `packages.find`). Docker files moved to `docker/`, the demo notebook to
+  `notebooks/`. Import paths (`monai_aegis.*`) and console commands are
+  unchanged. The pipeline runners' `--config` default now resolves the
+  packaged `config.yaml` from the package location, so it works from any
+  working directory.
+- The MCP server implementation now lives in the package
+  (`monai_aegis.mcp_server`, runnable as `aegis-mcp`); the root
+  `aegis_mcp_server.py` remains as a thin backward-compatible launcher.
 
 ### Removed
 - Stale `monai_aegis/setup.py`, which had drifted from `pyproject.toml`

@@ -12,7 +12,7 @@ import pydicom.uid
 import numpy as np
 
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'monai_aegis'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from monai_aegis.config.storage import AegisFileSystem
 

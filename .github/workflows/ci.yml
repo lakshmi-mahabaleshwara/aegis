@@ -23,13 +23,13 @@ jobs:
       - name: black (skill-surface modules)
         run: |
           black --check --line-length 120 \
-            monai_aegis/api.py monai_aegis/envelope.py monai_aegis/verify.py \
-            monai_aegis/skill_cli.py monai_aegis/verify_cli.py monai_aegis/fixtures.py
+            src/monai_aegis/api.py src/monai_aegis/envelope.py src/monai_aegis/verify.py \
+            src/monai_aegis/skill_cli.py src/monai_aegis/verify_cli.py src/monai_aegis/fixtures.py
       - name: flake8 (skill-surface modules)
         run: |
           flake8 --max-line-length=120 --extend-ignore=E203,W503 \
-            monai_aegis/api.py monai_aegis/envelope.py monai_aegis/verify.py \
-            monai_aegis/skill_cli.py monai_aegis/verify_cli.py monai_aegis/fixtures.py
+            src/monai_aegis/api.py src/monai_aegis/envelope.py src/monai_aegis/verify.py \
+            src/monai_aegis/skill_cli.py src/monai_aegis/verify_cli.py src/monai_aegis/fixtures.py
 
   test:
     runs-on: ubuntu-latest
@@ -44,7 +44,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install package with dev + mcp extras
-        run: pip install -e "monai_aegis/[dev,mcp]"
+        run: pip install -e ".[dev,mcp]"
       - name: Unit tests
         run: python -m pytest tests/unit -q
 
@@ -57,8 +57,6 @@ jobs:
           python-version: "3.11"
       - run: pip install build twine
       - name: Build sdist and wheel
-        working-directory: monai_aegis
         run: python -m build
       - name: Check distribution metadata
-        working-directory: monai_aegis
         run: twine check dist/*

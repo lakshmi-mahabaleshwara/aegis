@@ -98,13 +98,19 @@ class PHIClassifier:
                 self.local_files_only, self.device,
                 threading.current_thread().name,
             )
+            # Offline resolution is driven by the HF_HUB_OFFLINE /
+            # TRANSFORMERS_OFFLINE env vars set above (honoured across the
+            # tokenizer, config, and model loads). We deliberately do NOT
+            # pass local_files_only through model_kwargs: transformers >= 5
+            # forwards its own local_files_only into AutoConfig.from_pretrained,
+            # so a duplicate here raises "got multiple values for keyword
+            # argument 'local_files_only'" and breaks NER entirely.
             self._thread_local.pipeline = hf_pipeline(
                 'token-classification',
                 model=self.model_name,
                 revision=self.model_revision,
                 device=self.device,
                 aggregation_strategy='simple',
-                model_kwargs={'local_files_only': self.local_files_only},
             )
         return self._thread_local.pipeline
 

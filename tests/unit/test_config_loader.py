@@ -9,7 +9,7 @@ import yaml
 
 # Ensure monai_aegis is on the path
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'monai_aegis'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from monai_aegis.config.config_loader import resolve_env_vars, deep_merge, load_config
 
