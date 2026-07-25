@@ -40,6 +40,23 @@ __all__ = ["AegisFileSystem"]
 
 logger = logging.getLogger(__name__)
 
+# Protocols that resolve to the local filesystem — everything else is remote.
+_LOCAL_PROTOCOLS = frozenset({"file", "local"})
+
+# Remembers which remote protocols have already been warned about, so the
+# experimental notice is emitted once per process rather than on every
+# pipeline build or dataloader worker.
+_experimental_warned: set = set()
+
+_EXPERIMENTAL_STORAGE_NOTICE = (
+    "Storage protocol '%s' selected — remote/cloud storage is EXPERIMENTAL. "
+    "DICOM/image reads and writes use this backend, but ground-truth reports, "
+    "review-queue quarantine, the verification pass, and the public API's "
+    "input/output path handling still operate on local paths. A run may "
+    "therefore split its outputs between remote and local storage; validate "
+    "results before relying on this beyond experimentation."
+)
+
 
 class AegisFileSystem:
     """Unified file system abstraction using fsspec.
@@ -61,6 +78,9 @@ class AegisFileSystem:
         self.storage_options = storage_options
         self.fs = fsspec.filesystem(protocol, **storage_options)
         logger.info("AegisFileSystem initialized: protocol=%s", protocol)
+        if protocol not in _LOCAL_PROTOCOLS and protocol not in _experimental_warned:
+            _experimental_warned.add(protocol)
+            logger.warning(_EXPERIMENTAL_STORAGE_NOTICE, protocol)
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'AegisFileSystem':

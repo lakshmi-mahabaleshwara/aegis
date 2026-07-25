@@ -32,7 +32,12 @@ reporting:
   phi_report_dir: '${AEGIS_PHI_REPORT_DIR:}'
 
 storage:
-  protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file, s3, gs, az, memory
+  # 'file' is fully supported. Cloud/remote protocols (s3, gs, az, memory) are
+  # EXPERIMENTAL: they carry the core DICOM/image read+write, but reports,
+  # quarantine, verification, and the public API path handling still run
+  # locally, so a remote run may split outputs between remote and local
+  # storage. Selecting a non-file protocol logs a warning to that effect.
+  protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file (supported), s3/gs/az/memory (experimental)
   options: {}                                    # fsspec kwargs (key, secret, endpoint_url, etc.)
 
 tokenization:

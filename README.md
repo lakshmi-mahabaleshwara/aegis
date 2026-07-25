@@ -48,10 +48,14 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **Stable join key** — the *original* `SOPInstanceUID` is preserved in both files, so reports join directly to external ground truth that keys on the source UID
 - **Bring-your-own-database mode** — set `reporting.save_ground_truth: false` to skip CSV writing and instead pull the same per-file records straight from the pipeline data dict via `monai_aegis.reporting.extract_records(...)`
 
-### Cloud Storage (fsspec)
+### Cloud Storage (fsspec) — experimental
 - **Pluggable backends** — local filesystem, S3, GCS, Azure via `fsspec`
 - **Byte-stream I/O** — no temp files for cloud reads/writes
 - **Environment-aware config** — `${VAR_NAME:default}` interpolation with overlay support
+- **Experimental at this stage** — cloud/remote protocols are supported for the
+  core DICOM/image read and write, but ground-truth reports, review-queue
+  quarantine, verification, and the public API's path handling still run on
+  local paths. See [Cloud Storage](#cloud-storage-s3--gcs--azure) for scope.
 
 ---
 
@@ -255,6 +259,15 @@ pii_mapping:
 
 
 ### Cloud Storage (S3 / GCS / Azure)
+
+> **Experimental at this moment.** Cloud/remote backends are supported for the
+> core DICOM/image read and write path, and selecting a non-`file` protocol
+> emits a startup warning to that effect. Ground-truth report writing,
+> review-queue quarantine, the verification pass (`aegis-verify`), and the
+> public `deidentify()` API's input/output path handling currently operate on
+> local paths — so a cloud run can split its outputs between remote and local
+> storage. Validate results before using this beyond experimentation; full
+> end-to-end cloud support is in progress.
 
 ```yaml
 # config.prod.yaml — overlay for cloud deployment
