@@ -528,7 +528,11 @@ any time.
     "aegis": {
       "command": "/path/to/aegis/venv/bin/python",
       "args": ["/path/to/aegis/aegis_mcp_server.py"],
-      "env": { "AEGIS_ROOT": "/path/to/aegis", "AEGIS_DEVICE": "mps" }
+      "env": {
+        "AEGIS_OUTPUT_DIR": "/path/to/aegis/staging_output",
+        "AEGIS_REVIEW_DIR": "/path/to/aegis/staging_not_processed",
+        "AEGIS_DEVICE": "mps"
+      }
     }
   }
 }
@@ -552,8 +556,12 @@ uvx mcpo --port 8000 -- venv/bin/python aegis_mcp_server.py
 The server is stdio-only (mcpo provides HTTP bridging), logs exclusively to
 stderr, and keeps all models on a single dedicated pipeline thread so
 `warm_up` benefits every subsequent call. Server constants (paths, response
-limits, batch modes) live in `monai_aegis/config/mcp_server_config.py`.
-Environment: `AEGIS_ROOT` (defaults to the repo root) and `AEGIS_DEVICE`
+limits, batch modes) live in `monai_aegis/config/mcp_server_config.py`. The
+packaged `config.yaml` is resolved from the installed package automatically —
+no path env var is needed. Environment: `AEGIS_OUTPUT_DIR` / `AEGIS_REVIEW_DIR`
+override the default output and review directories (relative to the launch
+directory otherwise, so set them to absolute paths when the host launches the
+server with an unpredictable working directory), and `AEGIS_DEVICE`
 (`cpu`/`mps`/`cuda`, consumed by the NER config).
 
 ### Claude Code Plugin (Agent Skill + MCP)
@@ -564,8 +572,11 @@ the de-identification workflow, CLI fallback, and PHI-handling guardrails)
 and an **MCP registration** for `aegis_mcp_server.py`.
 
 ```bash
-# 1. Point the plugin's MCP config at your Aegis checkout (add to your shell profile)
-export AEGIS_ROOT=/path/to/aegis        # must contain venv/ with monai_aegis installed
+# 1. Optional: pin where the server writes output/review files (add to your shell
+#    profile). Absolute paths are recommended so files land in a known place
+#    regardless of the host's launch directory.
+export AEGIS_OUTPUT_DIR=/path/to/aegis/staging_output          # optional
+export AEGIS_REVIEW_DIR=/path/to/aegis/staging_not_processed   # optional
 export AEGIS_DEVICE=mps                  # optional: cpu (default) / mps / cuda
 
 # 2. Inside Claude Code:

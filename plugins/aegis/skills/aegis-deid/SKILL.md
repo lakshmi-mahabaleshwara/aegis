@@ -46,8 +46,8 @@ The Aegis checkout location must be known. Resolve it in this order: the
 
 ```bash
 python -m venv venv && source venv/bin/activate
-pip install -e monai_aegis/
-python scripts/prefetch_models.py --config monai_aegis/config/config.yaml  # optional: offline runs
+pip install -e .
+python scripts/prefetch_models.py --config src/monai_aegis/config/config.yaml  # optional: offline runs
 ```
 
 ## Preferred path: MCP tools
@@ -79,13 +79,15 @@ When the MCP server is not connected, run the pipeline directly from the Aegis
 root (activate `venv` first):
 
 ```bash
-# Unified orchestrator — DICOM + images, series-aware (recommended)
-aegis-pipeline --config monai_aegis/config/config.yaml --mode auto
+# Unified orchestrator — DICOM + images, series-aware (recommended).
+# --config defaults to the packaged config.yaml and works from any directory;
+# pass --config only to point at a custom overlay.
+aegis-pipeline --mode auto
 
 # Single pipelines
-python -m monai_aegis.dicom_runner --config monai_aegis/config/config.yaml          # series mode
-python -m monai_aegis.dicom_runner --config monai_aegis/config/config.yaml --mode single
-python -m monai_aegis.image_runner --config monai_aegis/config/config.yaml
+python -m monai_aegis.dicom_runner                    # series mode
+python -m monai_aegis.dicom_runner --mode single
+python -m monai_aegis.image_runner
 ```
 
 Inputs are read from `staging_input/` (override with `AEGIS_INPUT_DIR`).

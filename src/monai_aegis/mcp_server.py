@@ -42,7 +42,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from monai_aegis.config.mcp_server_config import (
-    AEGIS_ROOT,
     BATCH_MODES,
     CONFIG_PATH,
     DEFAULT_OUTPUT_DIR,
@@ -738,11 +737,14 @@ def main() -> None:
         format="[aegis-mcp] %(asctime)s %(levelname)s %(name)s - %(message)s",
         datefmt="%H:%M:%S",
     )
-    logger.info("Starting aegis-mcp | root=%s | config=%s", AEGIS_ROOT, CONFIG_PATH)
+    logger.info(
+        "Starting aegis-mcp | config=%s | output=%s | review=%s",
+        CONFIG_PATH, DEFAULT_OUTPUT_DIR, REVIEW_DIR,
+    )
     if not CONFIG_PATH.is_file():
         logger.warning(
-            "Config file not found: %s — tools will return structured errors "
-            "until it exists (set AEGIS_ROOT to the Aegis repo root).",
+            "Packaged config file not found: %s — tools will return structured "
+            "errors until the package is installed correctly.",
             CONFIG_PATH,
         )
 
