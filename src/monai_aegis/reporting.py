@@ -83,6 +83,17 @@ def _source_path(data_dict: Dict[Any, Any], key: str) -> str:
     return str(fpath)
 
 
+def _slice_uris(data_dict: Dict[Any, Any], key: str) -> List[str]:
+    """Per-slice source paths for a series, index-aligned with slice/frame index.
+
+    Empty for inputs that don't carry a ``slice_uris`` meta entry (single
+    images), in which case callers fall back to the single source path.
+    """
+    meta = data_dict.get(ck(key, ckeys.META_DICT), {}) or {}
+    uris = meta.get("slice_uris")
+    return [str(u) for u in uris] if isinstance(uris, (list, tuple)) else []
+
+
 def _uid_pairs(data_dict: Dict[Any, Any], key: str) -> Tuple[List[Tuple[str, str]], bool]:
     """Return ``[(original_sop_uid, deid_sop_uid), ...]`` and an is_series flag.
 
@@ -114,8 +125,21 @@ def extract_records(
     sections simply yield no rows.
     """
     source_path = _source_path(data_dict, key)
+    slice_uris = _slice_uris(data_dict, key)
     pairs, is_series = _uid_pairs(data_dict, key)
     default_orig, default_deid = pairs[0] if pairs else ("", "")
+
+    def _slice_source(index: Any) -> str:
+        """Per-slice source path, falling back to the single source path.
+
+        Keeps ``source_path`` attribution frame-accurate for multi-file
+        series (each row points at the slice it came from), while single
+        images and multi-frame files — whose ``slice_uris`` don't span the
+        frame index — resolve to their one real file via the fallback.
+        """
+        if isinstance(index, int) and 0 <= index < len(slice_uris):
+            return slice_uris[index]
+        return source_path
 
     # --- Pixel detections (burnt-in PHI) ---
     pixel_rows: List[Dict[str, Any]] = []
@@ -128,7 +152,7 @@ def extract_records(
         bbox = det.get("bbox", [None, None, None, None])
         bx, by, bw, bh = (list(bbox) + [None, None, None, None])[:4]
         pixel_rows.append({
-            "source_path": source_path,
+            "source_path": _slice_source(frame_index),
             "original_sop_uid": orig_uid,
             "deid_sop_uid": deid_uid,
             "frame_index": frame_index if frame_index is not None else "",
@@ -144,7 +168,7 @@ def extract_records(
     if isinstance(per_slice, list):
         for i, actions in enumerate(per_slice):
             orig_uid, deid_uid = pairs[i] if i < len(pairs) else (default_orig, default_deid)
-            tag_rows.extend(_tag_rows(actions, source_path, orig_uid, deid_uid))
+            tag_rows.extend(_tag_rows(actions, _slice_source(i), orig_uid, deid_uid))
     else:
         tag_rows.extend(_tag_rows(
             data_dict.get(ck(key, ckeys.TAG_ACTIONS), []),
