@@ -208,9 +208,12 @@ def deidentify(
                 )
             )
             logger.info("Processed %s (%s)", name, kind)
-        except Exception as exc:  # per-file: record and continue (P4: message only)
+        except Exception as exc:  # per-file: record and continue
+            # Full message + traceback go to the logs; the envelope carries
+            # only a PHI-safe error code (P4) — a raw message could echo tag
+            # values or OCR text from the failing file.
             logger.exception("Failed on %s", name)
-            entries.append(envelope.failed_file_entry(name, kind, f"{type(exc).__name__}: {exc}"))
+            entries.append(envelope.failed_file_entry(name, kind, envelope.safe_error(exc)))
 
     report_paths: List[str] = []
     if targets and reporting.is_enabled(config):

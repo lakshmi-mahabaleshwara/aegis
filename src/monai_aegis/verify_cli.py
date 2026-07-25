@@ -78,8 +78,10 @@ def main(argv=None) -> int:
         return EXIT_INVALID_INPUT
     except Exception as exc:  # invalid checklist, unreadable DICOM, ...
         logging.getLogger("aegis-verify").exception("Verification failed to run")
+        from monai_aegis import envelope
+
         _emit(
-            {"status": "error", "message": f"{type(exc).__name__}: {exc}", "run_dir": args.run_dir},
+            {"status": "error", "message": envelope.safe_error(exc), "run_dir": args.run_dir},
             args.pretty,
         )
         return EXIT_ERROR

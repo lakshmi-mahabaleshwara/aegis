@@ -139,7 +139,7 @@ def main(argv=None) -> int:
         exit_code = EXIT_INVALID_INPUT
     except Exception as exc:  # config errors, model failures before any file
         logging.getLogger("aegis-deidentify").exception("Run failed")
-        result = envelope.error_envelope(f"{type(exc).__name__}: {exc}", args.input, args.output_dir)
+        result = envelope.error_envelope(envelope.safe_error(exc), args.input, args.output_dir)
         exit_code = EXIT_ERROR
     else:
         if result["status"] == envelope.STATUS_ERROR:

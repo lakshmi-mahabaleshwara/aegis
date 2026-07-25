@@ -69,10 +69,12 @@ def test_input_error_exit_two_with_envelope(monkeypatch, capsys):
 
 
 def test_unexpected_error_exit_one_with_envelope(monkeypatch, capsys):
-    code, env, _ = _run(monkeypatch, capsys, raises=RuntimeError("model load failed"))
+    code, env, _ = _run(monkeypatch, capsys, raises=RuntimeError("model load failed on patient X"))
     assert code == skill_cli.EXIT_ERROR
     assert env["status"] == "error"
-    assert "RuntimeError" in env["message"]
+    # PHI-safe: the envelope message is the exception type, not the raw text.
+    assert env["message"] == "RuntimeError"
+    assert "patient X" not in json.dumps(env)
 
 
 def test_stdout_is_single_json_document(monkeypatch, capsys):

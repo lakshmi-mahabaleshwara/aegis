@@ -226,7 +226,15 @@ def _error(message: str, **extra: Any) -> Dict[str, Any]:
 
 
 def _exc_message(exc: BaseException) -> str:
-    return f"{type(exc).__name__}: {exc}"
+    # PHI-safe error code for tool responses: an MCP response leaves the
+    # trust boundary (it enters an agent's context / an LLM provider), so a
+    # raw exception message — which may carry tag values or OCR text — must
+    # never be returned. Full detail stays in the server-side logs. Honors
+    # the AEGIS_VERBOSE_ERRORS opt-in via envelope.safe_error.
+    from monai_aegis import envelope
+
+    logger.exception("tool error: %s", type(exc).__name__)
+    return envelope.safe_error(exc)
 
 
 def _resolve_dir(value: str, default: Path) -> Path:

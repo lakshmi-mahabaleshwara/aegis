@@ -191,6 +191,32 @@ def test_error_envelope():
 
 
 # ---------------------------------------------------------------------------
+# safe_error — PHI-safe exception rendering (P4)
+# ---------------------------------------------------------------------------
+
+
+def test_safe_error_returns_type_name_only(monkeypatch):
+    monkeypatch.delenv(envelope.VERBOSE_ERRORS_ENV, raising=False)
+    exc = ValueError("bad date 1985-03-04 for John Doe")
+    rendered = envelope.safe_error(exc)
+    assert rendered == "ValueError"
+    assert "John Doe" not in rendered
+    assert "1985-03-04" not in rendered
+
+
+def test_safe_error_verbose_opt_in_includes_message(monkeypatch):
+    monkeypatch.setenv(envelope.VERBOSE_ERRORS_ENV, "1")
+    exc = ValueError("context detail")
+    assert envelope.safe_error(exc) == "ValueError: context detail"
+
+
+def test_safe_error_verbose_falsey_values_stay_safe(monkeypatch):
+    for value in ("0", "false", "no", "off", ""):
+        monkeypatch.setenv(envelope.VERBOSE_ERRORS_ENV, value)
+        assert envelope.safe_error(RuntimeError("secret")) == "RuntimeError"
+
+
+# ---------------------------------------------------------------------------
 # Schema conformance
 # ---------------------------------------------------------------------------
 

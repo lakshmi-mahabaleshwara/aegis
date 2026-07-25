@@ -25,11 +25,36 @@ reading pipeline records directly.
 from __future__ import annotations
 
 import json
+import os
 from importlib import resources
 from typing import Any, Dict, List, Optional
 
 ENVELOPE_VERSION = "1.0"
 TOOL_NAME = "monai-aegis"
+
+# Opt-in escape hatch for local debugging: when set truthy, error fields carry
+# the full exception message. Off by default so the response contract stays
+# PHI-free (P4) — third-party exception messages can embed tag values or OCR
+# text. The full message + traceback are always in server-side logs regardless.
+VERBOSE_ERRORS_ENV = "AEGIS_VERBOSE_ERRORS"
+
+
+def safe_error(exc: BaseException) -> str:
+    """Render an exception for the response contract without leaking PHI (P4).
+
+    Returns the exception *type* name only — a stable, machine-readable
+    error code that is safe by construction. The raw message is withheld
+    because libraries in the stack (pydicom, PIL, numpy) may populate it
+    with DICOM element values or OCR text. Operators get the full message
+    and traceback from ``logger.exception`` on the server side; callers who
+    own the data and are debugging locally can opt back into the full
+    message with ``AEGIS_VERBOSE_ERRORS=1``.
+    """
+    name = type(exc).__name__
+    flag = os.environ.get(VERBOSE_ERRORS_ENV, "").strip().lower()
+    if flag in ("1", "true", "yes", "on"):
+        return f"{name}: {exc}"
+    return name
 
 # Canonical pixel-decision categories, in report order. Other modules
 # (including the MCP server config) import this rather than redefining it.
@@ -217,6 +242,7 @@ __all__ = [
     "failed_file_entry",
     "build_envelope",
     "error_envelope",
+    "safe_error",
     "schema",
     "validate_envelope",
 ]

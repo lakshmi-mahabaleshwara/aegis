@@ -185,15 +185,42 @@ def test_directory_run_per_file_error_continues(stubbed, monkeypatch):
     assert {f["source_file"] for f in env["files"] if f["status"] == "processed"} == {"b.dcm", "c.png"}
 
 
-def test_envelope_is_phi_free_even_when_errors_echo_exception(stubbed, monkeypatch):
-    # The stub's exception message deliberately carries PHI-looking text;
-    # P4 says messages are passed through as-is, but pipeline records
-    # (ocr_text, tokens) must never appear.
+def test_envelope_error_field_is_phi_free(stubbed, monkeypatch):
+    # The stub raises RuntimeError("boom while reading John Doe 1985-03-04").
+    # The failing file's error field must carry only a PHI-safe code (the
+    # exception type), never the raw message that embeds PHI (P4).
     in_dir, out_dir, pipelines = stubbed
+
+    def failing_build(kind, config_path, input_dir, output_dir, overlay_path=None):
+        pipelines.setdefault(kind, _FakePipeline(output_dir, fail_on={"a.dcm"}))
+        return pipelines[kind]
+
+    monkeypatch.setattr(api, "_build_pipeline", failing_build)
     env = api.deidentify(str(in_dir), str(out_dir))
+
+    failed = next(f for f in env["files"] if f["status"] == "failed")
+    assert failed["error"] == "RuntimeError"  # type name only, no message
+
     text = json.dumps(env)
+    assert PHI_TEXT not in text  # the exception message is withheld
     assert "ocr_text" not in text
     assert "text_token" not in text
+
+
+def test_verbose_errors_opt_in_restores_message(stubbed, monkeypatch):
+    # Local-debugging escape hatch: AEGIS_VERBOSE_ERRORS re-enables the full
+    # message for the caller who owns the data.
+    in_dir, out_dir, pipelines = stubbed
+    monkeypatch.setenv("AEGIS_VERBOSE_ERRORS", "1")
+
+    def failing_build(kind, config_path, input_dir, output_dir, overlay_path=None):
+        pipelines.setdefault(kind, _FakePipeline(output_dir, fail_on={"a.dcm"}))
+        return pipelines[kind]
+
+    monkeypatch.setattr(api, "_build_pipeline", failing_build)
+    env = api.deidentify(str(in_dir), str(out_dir))
+    failed = next(f for f in env["files"] if f["status"] == "failed")
+    assert failed["error"].startswith("RuntimeError: ")
 
 
 def test_empty_directory_success_with_message(stubbed, tmp_path):

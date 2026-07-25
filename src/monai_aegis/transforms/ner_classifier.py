@@ -23,6 +23,7 @@ import logging
 from typing import List, Dict, Any, Optional
 
 from monai_aegis.config.config_loader import as_bool
+from monai_aegis.transforms.utility import AegisIdentityManager
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,15 @@ class PHIClassifier:
         self.phi_heuristic_patterns = [
             re.compile(p) for p in ner_config.get('phi_heuristic_patterns', [])
         ]
+        # OCR fragments are the burned-in PHI this pipeline exists to redact,
+        # so they are never logged raw. This tokenizer renders them as the
+        # same deterministic token the ground-truth report uses, keeping log
+        # lines correlatable with the report without disclosing content.
+        self._identity = AegisIdentityManager.from_config(config)
+
+    def _safe(self, text: str) -> str:
+        """PHI-safe descriptor of an OCR fragment for logging (token + length)."""
+        return f"{self._identity.get_token(text)} len={len(text)}"
 
     @property
     def pipeline(self):
@@ -152,13 +162,13 @@ class PHIClassifier:
 
             # Layer 1: Clinical allowlist/patterns → preserve
             if self._is_clinical(text):
-                logger.debug("Clinical term (preserved): '%s'", text)
+                logger.debug("Clinical term (preserved): %s", self._safe(text))
                 results.append(False)
                 continue
 
             # Layer 2: PHI heuristic patterns → redact
             if self._is_phi_heuristic(text):
-                logger.debug("Heuristic PHI (redacted): '%s'", text)
+                logger.debug("Heuristic PHI (redacted): %s", self._safe(text))
                 results.append(True)
                 continue
 
@@ -183,13 +193,16 @@ class PHIClassifier:
                         for ent in entities
                     )
                     if is_phi:
-                        logger.debug("NER classified as PHI: '%s' → %s", orig_text,
+                        # entity_group values are category labels (PATIENT,
+                        # DATE, ...), never the matched text — safe to log.
+                        logger.debug("NER classified as PHI: %s → %s", self._safe(orig_text),
                                      [e['entity_group'] for e in entities])
                     else:
-                        logger.debug("NER classified as non-PHI (preserved): '%s'", orig_text)
+                        logger.debug("NER classified as non-PHI (preserved): %s", self._safe(orig_text))
                     results[idx] = is_phi
                 except Exception as e:
-                    logger.error("NER classification error for '%s': %s", orig_text, e)
+                    logger.error("NER classification error for %s: %s", self._safe(orig_text),
+                                 type(e).__name__)
                     results[idx] = True  # default to PHI for safety
 
         return results
