@@ -6,7 +6,6 @@ output, parameterization, determinism (same arguments → same bytes), and
 the aegis-fixture CLI kind-by-extension dispatch.
 """
 
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +13,6 @@ import pydicom
 import pytest
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from monai_aegis import fixtures
 

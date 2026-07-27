@@ -18,7 +18,6 @@ import copy
 import csv
 import json
 import os
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -26,7 +25,6 @@ import pydicom
 import pytest
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from monai_aegis import api, envelope, skill_cli
 
@@ -74,8 +72,8 @@ def runs(tmp_path_factory):
     """One input set, de-identified twice with the same salt.
 
     Sets AEGIS_TOKEN_SALT through a MonkeyPatch context so it is restored on
-    teardown — a bare ``os.environ[...] =`` here leaks the salt into later
-    tests, and env salt overrides config salt (AegisIdentityManager).
+    teardown — a bare ``os.environ[...] =`` here would leak the salt into
+    later tests that expect a clean environment (e.g. default-salt resolution).
     """
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("AEGIS_TOKEN_SALT", SALT)

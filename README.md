@@ -398,6 +398,20 @@ at a directory *outside* the run output — Aegis then additionally writes
 the token) there, and refuses to run if the directory is unset or equal to
 the output directory. Handle that file as PHI.
 
+#### Error responses and logs
+
+Tool/CLI **responses** are PHI-free by default: on failure they carry only the
+exception *type* (a stable error code), never the raw message, which
+third-party libraries can populate with tag values or OCR text. `AEGIS_VERBOSE_ERRORS=1`
+restores the full message for local debugging — **never enable it in a shared,
+multi-tenant, agent, or production environment**, where the response (and any
+LLM/agent that reads it) would then receive raw PHI. Use it only on a machine
+where you own the data.
+
+Separately, **server-side logs are not PHI-free**: failures are logged with
+full tracebacks (`logger.exception`), which may contain PHI. Treat log output
+as sensitive — restrict and scrub access to it accordingly.
+
 ### `aegis_tag_actions.csv` — one row per scrubbed header tag
 | Column | Meaning |
 |--------|---------|

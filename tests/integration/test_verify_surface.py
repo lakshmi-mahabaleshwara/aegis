@@ -15,14 +15,11 @@ Run with pytest (module-scoped fixtures share the expensive pipeline run):
 
 import json
 import os
-import sys
-from pathlib import Path
 
 import numpy as np
 import pydicom
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from monai_aegis import api, fixtures, verify, verify_cli
 
@@ -39,8 +36,8 @@ def trust_loop(tmp_path_factory):
     """Generate fixtures, de-identify them once, return (in_dir, out_dir, env).
 
     Sets AEGIS_TOKEN_SALT through a MonkeyPatch context so it is restored on
-    teardown rather than leaking into later tests (env salt overrides config
-    salt in AegisIdentityManager).
+    teardown rather than leaking into later tests that expect a clean
+    environment (e.g. default-salt resolution).
     """
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("AEGIS_TOKEN_SALT", "verify-surface-salt")

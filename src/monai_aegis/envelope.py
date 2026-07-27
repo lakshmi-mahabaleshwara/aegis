@@ -36,6 +36,13 @@ TOOL_NAME = "monai-aegis"
 # the full exception message. Off by default so the response contract stays
 # PHI-free (P4) — third-party exception messages can embed tag values or OCR
 # text. The full message + traceback are always in server-side logs regardless.
+#
+# NEVER enable AEGIS_VERBOSE_ERRORS in a shared, multi-tenant, agent, or
+# production environment: it intentionally routes raw exception text into the
+# response, which can carry PHI to whoever (or whatever LLM/agent) reads it.
+# Use it only on a local machine where you own the data. Independently, treat
+# server-side logs as potentially PHI-bearing — logger.exception() records full
+# tracebacks — and restrict/scrub log access accordingly.
 VERBOSE_ERRORS_ENV = "AEGIS_VERBOSE_ERRORS"
 
 
@@ -55,6 +62,7 @@ def safe_error(exc: BaseException) -> str:
     if flag in ("1", "true", "yes", "on"):
         return f"{name}: {exc}"
     return name
+
 
 # Canonical pixel-decision categories, in report order. Other modules
 # (including the MCP server config) import this rather than redefining it.

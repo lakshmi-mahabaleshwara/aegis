@@ -151,10 +151,10 @@ class TestUidGraphRemap(unittest.TestCase):
     """The scrubber replaces every patient-linkable UID (PS3.15 action U)."""
 
     def setUp(self):
-        # These tests drive the salt through config; AEGIS_TOKEN_SALT would
-        # override it (AegisIdentityManager gives env priority), so neutralize
-        # any ambient value and restore it afterwards. Keeps the suite immune
-        # to a leaked env salt regardless of test order.
+        # These tests set the salt via config, which is authoritative
+        # (AegisIdentityManager: config salt wins over AEGIS_TOKEN_SALT). We
+        # still neutralize any ambient env salt so the tests stay hermetic and
+        # independent of precedence details, restoring it afterwards.
         self._saved_salt = os.environ.pop("AEGIS_TOKEN_SALT", None)
 
     def tearDown(self):

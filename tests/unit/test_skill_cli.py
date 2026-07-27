@@ -7,12 +7,9 @@ its behavior is covered by test_api.py.
 """
 
 import json
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from monai_aegis import api, envelope, skill_cli
 

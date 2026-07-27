@@ -22,6 +22,8 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 # Upper bounds guard the next major of the dependencies whose behavior
 # shapes Aegis output. pydicom is capped below 4 because the current save
@@ -95,6 +97,9 @@ disallow_untyped_defs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Resolve the package from src/ so tests import it the way users do, without
+# per-file sys.path hacks (and even when it isn't editable-installed).
+pythonpath = ["src"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

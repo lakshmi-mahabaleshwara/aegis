@@ -9,13 +9,10 @@ pydicom datasets and CSVs — no models, no pipeline.
 
 import csv
 import json
-import sys
-from pathlib import Path
 
 import pydicom
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from monai_aegis import verify
 from monai_aegis.api import InputError

@@ -6,10 +6,7 @@ stubbed; its behavior is covered by test_verify.py.
 """
 
 import json
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from monai_aegis import verify, verify_cli
 from monai_aegis.api import InputError

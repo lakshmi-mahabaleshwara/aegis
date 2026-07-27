@@ -8,12 +8,10 @@ never invoked — pipeline execution is stubbed at the server's seams.
 """
 import csv
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from monai_aegis import mcp_server as server
 

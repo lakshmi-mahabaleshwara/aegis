@@ -72,9 +72,17 @@ class AegisIdentityManager:
         """Create an AegisIdentityManager from the pipeline config.
 
         Resolution order:
-            1. ``AEGIS_TOKEN_SALT`` environment variable
-            2. ``config['tokenization']['salt']``
+            1. ``config['tokenization']['salt']`` — an explicit, non-empty salt
+            2. ``AEGIS_TOKEN_SALT`` environment variable
             3. Built-in default
+
+        Explicit config wins over the environment on purpose: a library or
+        API caller who passes a salt in *config* must be able to rely on it,
+        rather than have an ambient host ``AEGIS_TOKEN_SALT`` silently
+        override the pseudonym linkage they configured. The env var remains
+        the ergonomic deployment override — the shipped ``config.yaml`` sets
+        ``salt: '${AEGIS_TOKEN_SALT:}'``, so an env-driven salt still flows in
+        through interpolation when config doesn't pin an explicit value.
 
         Args:
             config: The loaded pipeline configuration dictionary.
@@ -82,16 +90,16 @@ class AegisIdentityManager:
         Returns:
             Configured AegisIdentityManager instance.
         """
-        # Env var takes priority over config
-        env_salt = os.environ.get("AEGIS_TOKEN_SALT")
-        if env_salt:
-            return cls(salt=env_salt)
-
-        # Check config
+        # Explicit config salt wins — a caller-supplied value is authoritative.
         token_config = config.get("tokenization", {})
         config_salt = token_config.get("salt")
         if config_salt:
             return cls(salt=config_salt)
+
+        # Otherwise the environment provides the salt (deployment override).
+        env_salt = os.environ.get("AEGIS_TOKEN_SALT")
+        if env_salt:
+            return cls(salt=env_salt)
 
         # Fall back to default
         return cls()
