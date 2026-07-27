@@ -71,17 +71,23 @@ def _make_dicom(path: Path) -> None:
 
 @pytest.fixture(scope="module")
 def runs(tmp_path_factory):
-    """One input set, de-identified twice with the same salt."""
-    os.environ["AEGIS_TOKEN_SALT"] = SALT
-    in_dir = tmp_path_factory.mktemp("skill_in")
-    _make_dicom(in_dir / "scan.dcm")
-    Image.new("RGB", (16, 16), color="white").save(in_dir / "photo.jpg")
+    """One input set, de-identified twice with the same salt.
 
-    results = {}
-    for run in ("run1", "run2"):
-        out_dir = tmp_path_factory.mktemp(f"skill_out_{run}")
-        results[run] = (out_dir, api.deidentify(str(in_dir), str(out_dir)))
-    return in_dir, results
+    Sets AEGIS_TOKEN_SALT through a MonkeyPatch context so it is restored on
+    teardown — a bare ``os.environ[...] =`` here leaks the salt into later
+    tests, and env salt overrides config salt (AegisIdentityManager).
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("AEGIS_TOKEN_SALT", SALT)
+        in_dir = tmp_path_factory.mktemp("skill_in")
+        _make_dicom(in_dir / "scan.dcm")
+        Image.new("RGB", (16, 16), color="white").save(in_dir / "photo.jpg")
+
+        results = {}
+        for run in ("run1", "run2"):
+            out_dir = tmp_path_factory.mktemp(f"skill_out_{run}")
+            results[run] = (out_dir, api.deidentify(str(in_dir), str(out_dir)))
+        yield in_dir, results
 
 
 # ---------------------------------------------------------------------------

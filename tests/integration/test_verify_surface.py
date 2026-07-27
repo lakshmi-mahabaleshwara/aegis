@@ -36,20 +36,26 @@ FIXTURE_TEXT_SIZE = 26
 
 @pytest.fixture(scope="module")
 def trust_loop(tmp_path_factory):
-    """Generate fixtures, de-identify them once, return (in_dir, out_dir, env)."""
-    os.environ["AEGIS_TOKEN_SALT"] = "verify-surface-salt"
-    in_dir = tmp_path_factory.mktemp("verify_in")
-    fixtures.make_synthetic_dicom(
-        str(in_dir / "scan.dcm"),
-        size=FIXTURE_SIZE,
-        burned_in_text=BURNED_IN_LINES,
-        text_size=FIXTURE_TEXT_SIZE,
-        with_private_tag=True,
-    )
-    fixtures.make_synthetic_image(str(in_dir / "photo.png"))
-    out_dir = tmp_path_factory.mktemp("verify_out")
-    env = api.deidentify(str(in_dir), str(out_dir))
-    return in_dir, out_dir, env
+    """Generate fixtures, de-identify them once, return (in_dir, out_dir, env).
+
+    Sets AEGIS_TOKEN_SALT through a MonkeyPatch context so it is restored on
+    teardown rather than leaking into later tests (env salt overrides config
+    salt in AegisIdentityManager).
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("AEGIS_TOKEN_SALT", "verify-surface-salt")
+        in_dir = tmp_path_factory.mktemp("verify_in")
+        fixtures.make_synthetic_dicom(
+            str(in_dir / "scan.dcm"),
+            size=FIXTURE_SIZE,
+            burned_in_text=BURNED_IN_LINES,
+            text_size=FIXTURE_TEXT_SIZE,
+            with_private_tag=True,
+        )
+        fixtures.make_synthetic_image(str(in_dir / "photo.png"))
+        out_dir = tmp_path_factory.mktemp("verify_out")
+        env = api.deidentify(str(in_dir), str(out_dir))
+        yield in_dir, out_dir, env
 
 
 def test_raw_fixture_dir_fails_checklist(trust_loop):

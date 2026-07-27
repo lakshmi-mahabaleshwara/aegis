@@ -27,14 +27,22 @@ from monai_aegis.transforms.metadata import ScrubDicomMetadatad
 
 logger = logging.getLogger(__name__)
 
+# Packaged base config, resolved from this module's location so the builder
+# defaults work from any working directory (mirrors api.default_config_path()).
+DEFAULT_CONFIG_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config", "config.yaml")
+)
+
 
 def _resolve_builder_context(
     config_path: str, overlay_path: str | None = None
 ) -> Tuple[str, dict[str, Any], AegisFileSystem]:
     """Resolve config path, load config, log device, and build filesystem once."""
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    # A caller-supplied relative path resolves against the current working
+    # directory — the conventional expectation — not this module's directory.
+    # The packaged default is already absolute (DEFAULT_CONFIG_PATH).
     if not os.path.isabs(config_path):
-        config_path = os.path.join(base_dir, config_path)
+        config_path = os.path.abspath(config_path)
 
     config = load_config(config_path, overlay_path=overlay_path)
 
@@ -46,7 +54,7 @@ def _resolve_builder_context(
 
 
 def build_pipeline(
-    config_path: str = '../config/config.yaml',
+    config_path: str = DEFAULT_CONFIG_PATH,
     output_dir: str = './output',
     input_dir: str = '',
     overlay_path: str | None = None,
@@ -100,7 +108,7 @@ def build_pipeline(
 
 
 def build_series_pipeline(
-    config_path: str = '../config/config.yaml',
+    config_path: str = DEFAULT_CONFIG_PATH,
     output_dir: str = './output',
     input_dir: str = '',
     overlay_path: str | None = None,
@@ -147,7 +155,7 @@ def build_series_pipeline(
 
 
 def build_image_pipeline(
-    config_path: str = '../config/config.yaml',
+    config_path: str = DEFAULT_CONFIG_PATH,
     output_dir: str = './output',
     input_dir: str = '',
     output_ext: str = '.png',
@@ -188,7 +196,7 @@ def build_image_pipeline(
 
 
 def build_image_series_pipeline(
-    config_path: str = '../config/config.yaml',
+    config_path: str = DEFAULT_CONFIG_PATH,
     output_dir: str = './output',
     input_dir: str = '',
     output_ext: str = '.png',

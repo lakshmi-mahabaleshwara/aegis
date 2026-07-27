@@ -188,6 +188,32 @@ class TestLoadConfig(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             load_config('/nonexistent/config.yaml')
 
+    def test_missing_explicit_overlay_raises(self):
+        base_path = self._write_yaml({'mode': 'base'})
+        with self.assertRaises(FileNotFoundError):
+            load_config(base_path, overlay_path='/nonexistent/overlay.yaml')
+
+    def test_missing_env_overlay_raises(self):
+        # A typo'd production override must fail loudly, not silently fall
+        # back to the base config and drop the intended (stricter) controls.
+        base_path = self._write_yaml({'mode': 'base'})
+        os.environ['AEGIS_CONFIG_OVERRIDE'] = '/nonexistent/prod.yaml'
+        try:
+            with self.assertRaises(FileNotFoundError):
+                load_config(base_path)
+        finally:
+            del os.environ['AEGIS_CONFIG_OVERRIDE']
+
+    def test_empty_env_override_is_not_an_error(self):
+        # AEGIS_CONFIG_OVERRIDE='' means "no override" — load the base config.
+        base_path = self._write_yaml({'mode': 'base'})
+        os.environ['AEGIS_CONFIG_OVERRIDE'] = ''
+        try:
+            config = load_config(base_path)
+            self.assertEqual(config['mode'], 'base')
+        finally:
+            del os.environ['AEGIS_CONFIG_OVERRIDE']
+
 
 if __name__ == '__main__':
     unittest.main()

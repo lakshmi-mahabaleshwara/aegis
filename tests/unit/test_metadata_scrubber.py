@@ -150,6 +150,19 @@ _STD_ROOT = "1.2.840.10008"                   # DICOM standard (class) root
 class TestUidGraphRemap(unittest.TestCase):
     """The scrubber replaces every patient-linkable UID (PS3.15 action U)."""
 
+    def setUp(self):
+        # These tests drive the salt through config; AEGIS_TOKEN_SALT would
+        # override it (AegisIdentityManager gives env priority), so neutralize
+        # any ambient value and restore it afterwards. Keeps the suite immune
+        # to a leaked env salt regardless of test order.
+        self._saved_salt = os.environ.pop("AEGIS_TOKEN_SALT", None)
+
+    def tearDown(self):
+        if self._saved_salt is not None:
+            os.environ["AEGIS_TOKEN_SALT"] = self._saved_salt
+        else:
+            os.environ.pop("AEGIS_TOKEN_SALT", None)
+
     def _make_ds(self, sop="1", study="100", series="200", frame="300", salt="s1"):
         ds = Dataset()
         ds.PatientName = "Test^Patient"

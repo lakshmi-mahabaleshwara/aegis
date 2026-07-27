@@ -180,7 +180,9 @@ def load_config(
         Fully resolved configuration dictionary.
 
     Raises:
-        FileNotFoundError: If *config_path* does not exist.
+        FileNotFoundError: If *config_path* does not exist, or if a named
+            overlay (explicit *overlay_path* or ``AEGIS_CONFIG_OVERRIDE``)
+            does not exist.
         KeyError: If a ``${VAR}`` without a default references an unset
             environment variable.
     """
@@ -190,8 +192,17 @@ def load_config(
     logger.info("Loaded base config from %s", config_path)
 
     # --- 2. Overlay (explicit path or env var) ---
+    # A named overlay that is missing is an error, not a silent no-op: a
+    # typo'd AEGIS_CONFIG_OVERRIDE must never quietly fall back to the base
+    # config and drop the stricter controls the overlay was meant to apply.
     overlay = overlay_path or os.environ.get('AEGIS_CONFIG_OVERRIDE')
-    if overlay and os.path.isfile(overlay):
+    if overlay:
+        if not os.path.isfile(overlay):
+            raise FileNotFoundError(
+                f"overlay config not found: {overlay!r}. A requested overlay "
+                "that is missing is treated as an error so a typo cannot "
+                "silently drop the intended configuration."
+            )
         with open(overlay, 'r') as f:
             overlay_data = yaml.safe_load(f) or {}
         config = deep_merge(config, overlay_data)
