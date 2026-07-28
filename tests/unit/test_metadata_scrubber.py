@@ -260,5 +260,57 @@ class TestUidGraphRemap(unittest.TestCase):
                          str(out.SOPInstanceUID))
 
 
+class TestDummyTokenFitsVr(unittest.TestCase):
+    """A DUMMY token must conform to the target element's VR length limit.
+
+    ``TOKEN_`` + 16 hex = 22 chars overflows the 16-char VRs (SH/AE/CS);
+    over-length values are non-conformant and rejected by strict readers.
+    """
+
+    def _scrub(self, ds, salt="fit"):
+        cfg = {
+            "pii_mapping": {
+                "(0020,0010)": "DUMMY",  # StudyID  -> SH (16)
+                "(0010,0020)": "DUMMY",  # PatientID -> LO (64)
+                "(0010,0010)": "DUMMY",  # PatientName -> PN (64)
+            },
+            "tokenization": {"salt": salt},
+        }
+        return ScrubDicomMetadata(config=cfg).scrub("f.dcm", dataset=ds)
+
+    def _make_ds(self, study="788962607"):
+        ds = Dataset()
+        ds.StudyID = study
+        ds.PatientID = "3809/2025"
+        ds.PatientName = "MR.PATIENT 76Y"
+        return ds
+
+    def test_sh_token_truncated_to_16(self):
+        out, _ = self._scrub(self._make_ds())
+        value = str(out.StudyID)
+        self.assertLessEqual(len(value), 16)
+        self.assertTrue(value.startswith("TOKEN_"))
+
+    def test_long_vrs_keep_full_token(self):
+        out, _ = self._scrub(self._make_ds())
+        # LO/PN comfortably hold the full 22-char token — must not be truncated.
+        self.assertEqual(len(str(out.PatientID)), len("TOKEN_") + 16)
+        self.assertEqual(len(str(out.PatientName)), len("TOKEN_") + 16)
+
+    def test_sh_truncation_is_deterministic(self):
+        out1, _ = self._scrub(self._make_ds(), salt="k")
+        out2, _ = self._scrub(self._make_ds(), salt="k")
+        self.assertEqual(str(out1.StudyID), str(out2.StudyID))
+
+    def test_no_overflow_warning_emitted(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self._scrub(self._make_ds())
+        overflow = [w for w in caught if "exceeds the maximum length" in str(w.message)]
+        self.assertEqual(overflow, [], "SH token still overflows the VR length limit")
+
+
 if __name__ == '__main__':
     unittest.main()

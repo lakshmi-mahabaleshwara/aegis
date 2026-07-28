@@ -39,6 +39,25 @@ __all__ = ["ScrubDicomMetadata", "ScrubDicomMetadatad"]
 logger = logging.getLogger(__name__)
 
 
+# Maximum value length (in characters) for the fixed-length string VRs that a
+# DUMMY token may be written into. A token is ``TOKEN_`` + 16 hex chars = 22
+# characters, which overflows the 16-char VRs (SH, AE, CS). Over-length values
+# are non-conformant and rejected by strict DICOM readers, so a token bound for
+# one of these is truncated to fit. Truncation is deterministic (same source
+# value -> same prefix) and leaves >=10 hex chars (>=40 bits) of hash entropy —
+# ample for a pseudonym. VRs without a short fixed cap (LO=64, PN=64, and the
+# text VRs) comfortably hold the full token and are intentionally omitted.
+_VR_MAX_LEN = {"SH": 16, "AE": 16, "CS": 16}
+
+
+def _fit_token_to_vr(token: str, vr: str) -> str:
+    """Truncate a DUMMY token so it conforms to the element's VR length limit."""
+    limit = _VR_MAX_LEN.get(vr)
+    if limit is not None and len(token) > limit:
+        return token[:limit]
+    return token
+
+
 # ---------------------------------------------------------------------------
 # Array Transform
 # ---------------------------------------------------------------------------
@@ -280,7 +299,7 @@ class ScrubDicomMetadata(Transform):
             ds[tag].value = b'' if vr in ['OB', 'OW', 'UN'] else ''
         elif action == 'DUMMY':
             token = self.identity_manager.get_token(str(ds[tag].value))
-            ds[tag].value = token
+            ds[tag].value = _fit_token_to_vr(token, ds[tag].VR)
         elif action == 'KEEP':
             pass  # deliberate retention — value untouched, recorded below
         else:
