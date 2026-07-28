@@ -47,7 +47,7 @@ cloud = [
     "gcsfs",
     "adlfs",
 ]
-# Model Context Protocol server (aegis_mcp_server.py).
+# Model Context Protocol server (monai_aegis.mcp_server; run via `aegis-mcp`).
 mcp = [
     "mcp[cli]>=1.0.0",
 ]

@@ -2,7 +2,7 @@
 
 **Medical Image De-identification Pipeline with OCR, NER, and Series-Aware Volume Processing**
 
-Aegis is a production-ready pipeline for de-identifying medical images (DICOM series, individual DICOMs, JPEG, PNG) by removing Protected Health Information (PHI) while preserving critical clinical markers, image quality, and geometric metadata.
+Aegis is a pipeline for de-identifying medical images (DICOM series, individual DICOMs, JPEG, PNG) by removing Protected Health Information (PHI) while preserving critical clinical markers, image quality, and geometric metadata.
 
 ### Use Cases
 
@@ -19,12 +19,13 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 ### DICOM De-identification
 - **PS3.15 Basic Application Level Confidentiality Profile** — metadata scrubbing follows the DICOM standard with REMOVE / DUMMY / ZERO / KEEP actions, configurable via `pii_mapping` in `config.yaml`; a mistyped tag or action fails the run at startup instead of silently passing PHI through
 - **Recursive sequence scrubbing** — PII actions are applied to nested DICOM sequences (not just top-level tags)
-- **Deterministic tokenization** — patient metadata (PatientName, PatientID) is replaced with reproducible hash tokens via `AegisIdentityManager`, enabling re-linkage when the original salt is available
+- **Deterministic tokenization** — patient metadata (PatientName, PatientID) is replaced with reproducible hash tokens via `AegisIdentityManager`, enabling re-linkage when the original salt is available; tokens are automatically fitted to each tag's VR length limit so output stays DICOM-conformant
+- **Full UID-graph remap** — Study/Series/SOP/FrameOfReference and referenced UIDs are all replaced deterministically as a consistent graph (PS3.15 action U), so patient linkage is broken while intra-object references still resolve; class/standard-root UIDs are preserved
 - **Private tag removal** — all vendor-private tags are stripped for enhanced privacy
 - **Content-driven discovery** — DICOM files are detected by reading the 132-byte preamble (`DICM` magic), not by file extension, so extensionless hospital exports are found automatically
 
 ### Pixel Redaction
-- **Stanford NER-based PHI detection** — semantic classification via `stanford-deidentifier-base` (F1 ≥ 97.9%)
+- **Stanford NER-based PHI detection** — semantic classification via `stanford-deidentifier-base`
 - **3-layer classification pipeline**: clinical allowlist → PHI heuristics → NER model
 - **EasyOCR-based text detection** with configurable confidence thresholds
 - **US fan-geometry scoped OCR** — reads `SequenceOfUltrasoundRegions` (0018,6011) from DICOM metadata to restrict OCR to non-diagnostic zones, eliminating false positives in the clinical fan area
@@ -41,21 +42,15 @@ Aegis is a production-ready pipeline for de-identifying medical images (DICOM se
 - **Independent scaling** — each pipeline can run on separate infrastructure
 
 ### Ground-Truth Reporting & Validation
-- **Per-run "ground truth" CSVs** — when `reporting.save_ground_truth: true` (the default), each run records exactly what Aegis detected and redacted, so you can validate output against a known answer key
-- **`aegis_pixel_detections.csv`** — one row per OCR region: original/de-identified `SOPInstanceUID`, bounding box (`x, y, w, h`), frame index, tokenized text (`text_token` + `text_len` — PHI-free by default; verbatim text is opt-in via `reporting.include_phi_text` and written only outside the output dir), confidence, and decision (`redacted` / `safelisted` / `low_confidence`)
-- **`aegis_tag_actions.csv`** — one row per scrubbed DICOM header tag: tag, keyword, action (`REMOVE` / `DUMMY` / `ZERO` / `KEEP` / `ATTEST`), and the original/de-identified `SOPInstanceUID`
-- **PS3.15 attestation stamps** — every scrubbed DICOM carries `PatientIdentityRemoved=YES`, `DeidentificationMethod(CodeSequence)` (DCM 113100/113101), and `BurnedInAnnotation=NO` after pixel cleaning, so receivers can verify de-identification from the object itself
-- **Stable join key** — the *original* `SOPInstanceUID` is preserved in both files, so reports join directly to external ground truth that keys on the source UID
-- **Bring-your-own-database mode** — set `reporting.save_ground_truth: false` to skip CSV writing and instead pull the same per-file records straight from the pipeline data dict via `monai_aegis.reporting.extract_records(...)`
+- **Per-run "ground truth" CSVs** — each run records exactly what was detected and redacted (`aegis_pixel_detections.csv` for pixels, `aegis_tag_actions.csv` for header tags), so output can be validated against a known answer key. PHI-free by default; the source `SOPInstanceUID` is the stable join key
+- **PS3.15 attestation stamps** — every scrubbed DICOM is stamped so receivers can machine-verify de-identification from the object itself
+- **Bring-your-own-database mode** — skip CSVs and pull the same records from the pipeline data dict via `monai_aegis.reporting.extract_records(...)`
+
+See [Ground-Truth Reporting & Validation](#-ground-truth-reporting--validation) for the full column reference.
 
 ### Cloud Storage (fsspec) — experimental
-- **Pluggable backends** — local filesystem, S3, GCS, Azure via `fsspec`
-- **Byte-stream I/O** — no temp files for cloud reads/writes
-- **Environment-aware config** — `${VAR_NAME:default}` interpolation with overlay support
-- **Experimental at this stage** — cloud/remote protocols are supported for the
-  core DICOM/image read and write, but ground-truth reports, review-queue
-  quarantine, verification, and the public API's path handling still run on
-  local paths. See [Cloud Storage](#cloud-storage-s3--gcs--azure) for scope.
+- **Pluggable backends** — local filesystem, S3, GCS, Azure via `fsspec`, with `${VAR_NAME:default}` config interpolation and byte-stream I/O (no temp files)
+- **Experimental** — only the core DICOM/image read/write is cloud-aware; reports, quarantine, verification, and the public API still use local paths. See [Cloud Storage](#cloud-storage-s3--gcs--azure) for scope.
 
 ---
 
@@ -77,8 +72,13 @@ attestation attributes** — `PatientIdentityRemoved=YES` (0012,0062),
 `BurnedInAnnotation=NO` (0028,0301) after pixel cleaning — so receivers
 can machine-verify de-identification from the object itself.
 
-All DICOM UIDs (StudyInstanceUID, SeriesInstanceUID, SOPInstanceUID) are
-replaced with deterministically generated tokens, enabling re-linkage when the original salt is available.
+Patient-linkable DICOM UIDs are remapped as a graph (PS3.15 action U):
+StudyInstanceUID, SeriesInstanceUID, SOPInstanceUID, FrameOfReferenceUID, and
+referenced UIDs in nested sequences are all replaced with deterministically
+generated UIDs — a value reused across the object maps to the same replacement,
+so intra-object references still resolve. Class/standard-root UIDs (e.g.
+SOPClassUID, TransferSyntaxUID) are preserved so the object stays valid.
+Remapping is deterministic, enabling re-linkage when the original salt is available.
 
 HIPAA Safe Harbor de-identification is satisfied as a consequence of
 PS3.15 Basic Profile compliance, since the 18 HIPAA identifiers are a
@@ -103,6 +103,18 @@ Low-confidence OCR detections on either path are routed to `staging_not_processe
 ### Component Overview
 
 ![Component Diagram](docs/component_diagram.png)
+
+### Agent Skill & MCP Server
+
+The same pipeline is exposed to AI agents through two surfaces — the
+**agent skill** (`aegis-deid`, driving the console commands) and the
+**MCP server** (`aegis-mcp`, six stdio tools). Both sit behind a PHI-free
+boundary: responses carry only names, paths, counts, and job states — never
+pixel data, OCR text, tokens, or tag values. See
+[Skill Surface](#-skill-surface--single-command-de-identification-verification-fixtures)
+and [MCP Server](#-mcp-server-ai-agent-interface) below.
+
+![Agent Skill and MCP Server Diagram](docs/agent_mcp_diagram.png)
 
 ---
 
@@ -145,25 +157,19 @@ in any ecosystem.
 
 ### Command-Line Runners
 ```bash
-# DICOM pipeline — series mode (default)
-python -m monai_aegis.dicom_runner --config src/monai_aegis/config/config.yaml
+# DICOM pipeline  (series mode is default; add --mode single for per-file)
+python -m monai_aegis.dicom_runner
 
-# DICOM pipeline — single-file mode
-python -m monai_aegis.dicom_runner --config src/monai_aegis/config/config.yaml --mode single
+# Image pipeline
+python -m monai_aegis.image_runner
 
-# Image pipeline — series mode (default)
-python -m monai_aegis.image_runner --config src/monai_aegis/config/config.yaml
-
-# Image pipeline — single-file mode
-python -m monai_aegis.image_runner --config src/monai_aegis/config/config.yaml --mode single
-
-# Unified orchestrator — runs both DICOM and Image pipelines
-aegis-pipeline --config src/monai_aegis/config/config.yaml --mode auto
-
-# Output:
-#   Processed files → staging_output/dicom/<timestamp>/ or staging_output/image/<timestamp>/
-#   Rejected/flagged files → staging_not_processed/ (manual review, geometry mismatch, or transform errors)
+# Unified orchestrator — runs both pipelines
+aegis-pipeline --mode auto
 ```
+
+Config defaults to the packaged `config.yaml`; pass `--config path.yaml` to
+override. Processed files land in `staging_output/<dicom|image>/<timestamp>/`;
+rejected or low-confidence files go to `staging_not_processed/` for review.
 
 ---
 
@@ -193,7 +199,7 @@ reporting:
                             # must differ from the run output directory
 
 storage:
-  protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file, s3, gs, az
+  protocol: '${AEGIS_STORAGE_PROTOCOL:file}'   # file (supported); s3/gs/az/memory (experimental)
   options: {}                                   # fsspec options (credentials, etc.)
 
 tokenization:
@@ -337,7 +343,7 @@ When `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline
 ### PII Mapping Actions
 | Action | Behavior | Example |
 |--------|----------|---------|
-| `DUMMY` | Replace with deterministic hash token | `John Doe` → `TOKEN_a1b2c3d4e5f6` |
+| `DUMMY` | Replace with deterministic hash token | `John Doe` → `TOKEN_a1b2c3d4e5f6a7b8` |
 | `REMOVE` | Delete the DICOM tag entirely | Tag removed from dataset |
 | `ZERO` | Set to zero / empty value | `20250216` → `00000000` |
 | `KEEP` | Retain the value deliberately (audited with `redacted=False`) | Value unchanged, retention on record |
@@ -347,6 +353,12 @@ Actions are validated when the pipeline is constructed — an unknown action
 is processed, rather than silently leaving that tag's PHI in place.
 (`ATTEST` rows in the tag report are stamps Aegis writes, not a
 configurable action.)
+
+`DUMMY` tokens are `TOKEN_` + 16 hex characters (22 total). When the target
+tag's VR caps value length below that — the 16-char VRs `SH` / `AE` / `CS`,
+e.g. `StudyID` (0020,0010, VR=SH) — the token is deterministically truncated
+to fit so the output stays DICOM-conformant; longer VRs (`LO`, `PN`, text
+VRs) keep the full token.
 
 ---
 
@@ -422,13 +434,8 @@ as sensitive — restrict and scrub access to it accordingly.
 | `action` | `REMOVE` / `DUMMY` / `ZERO` / `KEEP` / `ATTEST` |
 | `redacted` | `True` when the action de-identified the element (`False` for `KEEP` retention and `ATTEST` stamps) |
 
-Every scrubbed DICOM is also stamped with the PS3.15 **de-identification
-attestation attributes** — `PatientIdentityRemoved=YES` (0012,0062),
-`DeidentificationMethod` (0012,0063), `DeidentificationMethodCodeSequence`
-(0012,0064) with DCM 113100 (+ 113101 when pixel redaction ran), and
-`BurnedInAnnotation=NO` after pixel cleaning — so receivers can verify
-de-identification from the object itself. These stamps appear in the tag
-report as `ATTEST` rows.
+The PS3.15 de-identification attestation attributes (see [Standards
+Compliance](#-standards-compliance)) appear in this report as `ATTEST` rows.
 
 ### Validating against external ground truth
 The *original* `SOPInstanceUID` is preserved in both reports (Aegis regenerates
@@ -701,8 +708,8 @@ AegisTransformError          ← base (catch-all)
 ├── PixelRedactionError      ← OCR / NER failure
 ├── MetadataScrubError       ← tag parsing / pixel injection
 ├── DicomSaveError           ← write failure
-├── SeriesLoadError          ← series assembly / geometry mismatch (NEW)
-└── SeriesSaveError          ← series write failure (NEW)
+├── SeriesLoadError          ← series assembly / geometry mismatch
+└── SeriesSaveError          ← series write failure
 ```
 
 **Usage in calling code:**
@@ -754,13 +761,13 @@ See [docker/DOCKER_TESTING.md](docker/DOCKER_TESTING.md) for full Docker guide.
 pip install -e ".[dev]"
 
 # Format
-black monai_aegis/transforms/ tests/
+black src/monai_aegis/ tests/
 
 # Lint
-flake8 monai_aegis/transforms/ tests/
+flake8 src/monai_aegis/ tests/
 
 # Type check
-mypy monai_aegis/transforms/
+mypy src/monai_aegis/
 ```
 
 ---
