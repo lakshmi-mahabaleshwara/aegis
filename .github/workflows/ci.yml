@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# The skill-surface modules are held to black + flake8; the unit suite runs
+# on every supported Python; packaging is built and metadata-checked. The
+# model-heavy integration suite (downloads the NER + OCR weights and runs
+# CPU inference) is not run here — see tests/integration/ to run it locally.
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install black flake8
+      - name: black (skill-surface modules)
+        run: |
+          black --check --line-length 120 \
+            src/monai_aegis/api.py src/monai_aegis/envelope.py src/monai_aegis/verify.py \
+            src/monai_aegis/skill_cli.py src/monai_aegis/verify_cli.py src/monai_aegis/fixtures.py
+      - name: flake8 (skill-surface modules)
+        run: |
+          flake8 --max-line-length=120 --extend-ignore=E203,W503 \
+            src/monai_aegis/api.py src/monai_aegis/envelope.py src/monai_aegis/verify.py \
+            src/monai_aegis/skill_cli.py src/monai_aegis/verify_cli.py src/monai_aegis/fixtures.py
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install package with dev + mcp extras
+        run: pip install -e ".[dev,mcp]"
+      - name: Unit tests
+        run: python -m pytest tests/unit -q
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install build twine
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Check distribution metadata
+        run: twine check dist/*

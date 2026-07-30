@@ -1,6 +1,7 @@
 import unittest
 import os
 import shutil
+import tempfile
 import numpy as np
 import pydicom
 from PIL import Image
@@ -117,11 +118,59 @@ class TestAegisPipeline(unittest.TestCase):
             f.write("ocr:\n  languages: ['en']\npii_mapping: {}\n")
             
         pipeline = build_image_pipeline(config_path=os.path.abspath(min_config_path))
-        
+
         # Run on JPEG
         data = {'image': self.jpg_path}
         result = pipeline(data)
         self.assertIn('image', result)
+
+
+class TestConfigPathResolution(unittest.TestCase):
+    """Config-path resolution in the pipeline builders."""
+
+    def test_default_config_path_is_absolute_and_exists(self):
+        from monai_aegis.transforms.pipeline import DEFAULT_CONFIG_PATH
+        self.assertTrue(os.path.isabs(DEFAULT_CONFIG_PATH))
+        self.assertTrue(os.path.isfile(DEFAULT_CONFIG_PATH))
+
+    def test_relative_config_path_resolves_against_cwd(self):
+        from unittest.mock import patch
+        from monai_aegis.transforms import pipeline as P
+
+        captured = {}
+
+        def fake_load(config_path, overlay_path=None):
+            captured['config_path'] = config_path
+            return {}
+
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                os.chdir(tmp)
+                with patch.object(P, 'load_config', side_effect=fake_load):
+                    P._resolve_builder_context('sub/my.yaml')
+            finally:
+                os.chdir(cwd)
+
+        # Resolved against the working directory, not the transforms/ package dir.
+        self.assertEqual(captured['config_path'], os.path.join(os.path.realpath(tmp), 'sub', 'my.yaml'))
+        self.assertNotIn('transforms', captured['config_path'])
+
+    def test_absolute_config_path_passed_through_unchanged(self):
+        from unittest.mock import patch
+        from monai_aegis.transforms import pipeline as P
+
+        captured = {}
+
+        def fake_load(config_path, overlay_path=None):
+            captured['config_path'] = config_path
+            return {}
+
+        abs_path = os.path.abspath('/tmp/aegis/explicit.yaml')
+        with patch.object(P, 'load_config', side_effect=fake_load):
+            P._resolve_builder_context(abs_path)
+        self.assertEqual(captured['config_path'], abs_path)
+
 
 if __name__ == '__main__':
     unittest.main()

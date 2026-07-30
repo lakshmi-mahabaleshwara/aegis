@@ -8,14 +8,12 @@ never invoked — pipeline execution is stubbed at the server's seams.
 """
 import csv
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import aegis_mcp_server as server
+from monai_aegis import mcp_server as server
 
 
 PHI_TEXT = "John Doe 1985-03-04"
@@ -161,7 +159,9 @@ def test_batch_job_discovery_failure_marks_failed(tmp_path, monkeypatch):
     job = _make_job("cafef00d", tmp_path, tmp_path / "out")
     server._run_batch_job(job)
     assert job["state"] == "failed"
-    assert "discovery exploded" in job["message"]
+    # PHI-safe: the job message carries the exception type, not the raw text.
+    assert job["message"] == "RuntimeError"
+    assert "discovery exploded" not in job["message"]
 
 
 def test_batch_job_empty_input_completes_with_message(tmp_path, monkeypatch):
@@ -392,6 +392,27 @@ def test_start_batch_job_bad_dir():
     response = server.start_batch_job("/definitely/not/a/dir")
     assert response["status"] == "error"
     assert "NotADirectoryError" in response["message"]
+
+
+def test_exc_message_withholds_raw_message(monkeypatch):
+    # An MCP tool response leaves the trust boundary (agent / LLM context), so
+    # a raw exception message that may embed PHI must never be returned.
+    monkeypatch.delenv("AEGIS_VERBOSE_ERRORS", raising=False)
+    try:
+        raise RuntimeError("failed on patient John Doe 1985-03-04")
+    except RuntimeError as exc:
+        rendered = server._exc_message(exc)
+    assert rendered == "RuntimeError"
+    assert "John Doe" not in rendered
+
+
+def test_exc_message_verbose_opt_in(monkeypatch):
+    monkeypatch.setenv("AEGIS_VERBOSE_ERRORS", "1")
+    try:
+        raise RuntimeError("local debugging detail")
+    except RuntimeError as exc:
+        rendered = server._exc_message(exc)
+    assert rendered == "RuntimeError: local debugging detail"
 
 
 def test_start_batch_job_registers_and_returns_next_step(tmp_path, monkeypatch):

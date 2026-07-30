@@ -1,0 +1,24 @@
+# Skill-mode overlay — applied by default for `aegis-deidentify` /
+# `monai_aegis.api.deidentify` invocations (deep-merged onto config.yaml,
+# then env-interpolated; see config_loader.load_config).
+#
+# Skill mode is data, not a code path: this file pins the behaviors a skill
+# harness relies on, independent of how the base config evolves. Replace it
+# by passing your own overlay (or setting AEGIS_CONFIG_OVERRIDE) — never by
+# editing code.
+#
+# The reproducibility contract additionally depends on two env vars:
+#   AEGIS_TOKEN_SALT       fixed salt → identical tokens and UIDs across runs
+#   AEGIS_CONFIG_OVERRIDE  replaces this overlay entirely when set
+# and offline runs on the standard pair (after scripts/prefetch_models.py):
+#   AEGIS_HF_OFFLINE=true  AEGIS_MODEL_DOWNLOADS=false
+
+runtime:
+  # Single-threaded loading: deterministic processing order and one resident
+  # model set — required for the repeat-run reproducibility guarantee.
+  dataloader_num_workers: 0
+
+reporting:
+  # The ground-truth CSVs are part of the skill contract: harnesses audit
+  # runs from them, so they must always be written alongside the artifacts.
+  save_ground_truth: true

@@ -91,5 +91,76 @@ class TestPHIClassifier(unittest.TestCase):
         self.assertEqual(results, [True])
 
 
+_LOGGER = "monai_aegis.transforms.ner_classifier"
+
+
+class TestPHIClassifierLoggingIsPhiFree(unittest.TestCase):
+    """OCR fragments are burned-in PHI; log lines must never echo them raw."""
+
+    def setUp(self):
+        # An explicit salt makes the logged token deterministic and avoids
+        # the default-salt warning noise.
+        self.config = {
+            'tokenization': {'salt': 'ner-log-test-salt'},
+            'ner': {
+                'enabled': True,
+                'phi_labels': ['PATIENT', 'HOSPITAL'],
+                'clinical_allowlist': ['depth 13.0'],
+                'clinical_patterns': [],
+                'phi_heuristic_patterns': [r'(?i)hospital'],
+            },
+        }
+
+    def _classifier(self, side_effect=None):
+        classifier = PHIClassifier(self.config)
+        if side_effect is not None:
+            mock_pipeline = MagicMock()
+            mock_pipeline.side_effect = side_effect
+            classifier._thread_local.pipeline = mock_pipeline
+        return classifier
+
+    def _assert_phi_free(self, records, secret):
+        blob = "\n".join(r.getMessage() for r in records)
+        self.assertNotIn(secret, blob, f"raw text leaked into logs: {blob!r}")
+        self.assertIn("TOKEN_", blob, "expected a tokenized reference in the log")
+
+    def test_heuristic_layer_logs_token_not_text(self):
+        secret = "SUNNYVALE HOSPITAL"
+        classifier = self._classifier()
+        with self.assertLogs(_LOGGER, level="DEBUG") as cm:
+            self.assertEqual(classifier.classify_texts([secret]), [True])
+        self._assert_phi_free(cm.records, secret)
+
+    def test_clinical_layer_logs_token_not_text(self):
+        secret = "Depth 13.0"
+        classifier = self._classifier()
+        with self.assertLogs(_LOGGER, level="DEBUG") as cm:
+            self.assertEqual(classifier.classify_texts([secret]), [False])
+        self._assert_phi_free(cm.records, secret)
+
+    def test_ner_layer_logs_token_not_text(self):
+        secret = "Zorquil Blaxton"  # reaches the NER model (no earlier match)
+        classifier = self._classifier(side_effect=[
+            [{'entity_group': 'PATIENT', 'score': 0.99}],
+        ])
+        with self.assertLogs(_LOGGER, level="DEBUG") as cm:
+            self.assertEqual(classifier.classify_texts([secret]), [True])
+        self._assert_phi_free(cm.records, secret)
+
+    def test_error_path_logs_neither_text_nor_exception_message(self):
+        secret = "Nevaeh Qwixby"
+        classifier = self._classifier(
+            side_effect=RuntimeError(f"model choked on {secret}")
+        )
+        with self.assertLogs(_LOGGER, level="ERROR") as cm:
+            self.assertEqual(classifier.classify_texts([secret]), [True])
+        blob = "\n".join(r.getMessage() for r in cm.records)
+        # Neither the OCR text nor the exception message (which embeds it)
+        # may appear — only the token and the exception type name.
+        self.assertNotIn(secret, blob)
+        self.assertIn("TOKEN_", blob)
+        self.assertIn("RuntimeError", blob)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -23,7 +23,7 @@ Usage
 
     python scripts/bench_aegis.py \\
         --input  staging_input/dicom \\
-        --config monai_aegis/config/config.yaml \\
+        --config src/monai_aegis/config/config.yaml \\
         --output tests/benchmark/results/ \\
         [--ground-truth tests/benchmark/public_dataset/ground_truth/annotations.csv] \\
         [--mode single|series]
@@ -506,8 +506,8 @@ def main() -> None:
         help="Input directory containing DICOM files to benchmark.",
     )
     parser.add_argument(
-        "--config", default="monai_aegis/config/config.yaml",
-        help="Path to config.yaml (default: monai_aegis/config/config.yaml).",
+        "--config", default="src/monai_aegis/config/config.yaml",
+        help="Path to config.yaml (default: src/monai_aegis/config/config.yaml).",
     )
     parser.add_argument(
         "--output", default="tests/benchmark/results/",

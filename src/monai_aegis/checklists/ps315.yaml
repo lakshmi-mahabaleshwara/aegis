@@ -1,0 +1,91 @@
+# Default verification checklist — asserts the guarantees of the packaged
+# pii_mapping and the PS3.15 attestation stamps on de-identified output.
+#
+# This file is data, not code: deployments with a customized pii_mapping
+# write their own checklist (any subset of the check vocabulary in
+# monai_aegis/verify.py) and pass it via `aegis-verify --checklist`.
+# Checklists are validated at load time; an unknown check type or
+# unresolvable tag fails immediately.
+#
+# severity: error (default) fails the run; warning is reported only.
+
+name: ps315-deidentification
+description: >
+  Verifies PS3.15 attestation stamps, tokenized patient identifiers,
+  removed/zeroed header PHI, absence of private tags, file-meta
+  consistency, and the presence and PHI-free shape of the ground-truth
+  reports — matching the packaged default pii_mapping.
+
+dicom_checks:
+  - id: attestation-patient-identity-removed
+    type: tag_equals
+    tag: "(0012,0062)"        # PatientIdentityRemoved
+    value: "YES"
+  - id: attestation-method-code-present
+    type: tag_present
+    tag: "(0012,0064)"        # DeidentificationMethodCodeSequence
+  - id: burned-in-annotation-cleared
+    type: tag_equals
+    tag: "(0028,0301)"        # BurnedInAnnotation
+    value: "NO"
+  - id: patient-name-tokenized
+    type: tag_matches
+    tag: "(0010,0010)"        # PatientName
+    pattern: "TOKEN_[0-9a-fA-F]+"
+    allow_absent: true
+  - id: patient-id-tokenized
+    type: tag_matches
+    tag: "(0010,0020)"        # PatientID
+    pattern: "TOKEN_[0-9a-fA-F]+"
+    allow_absent: true
+  - id: patient-birth-date-removed
+    type: tag_absent
+    tag: "(0010,0030)"        # PatientBirthDate
+  - id: accession-number-removed
+    type: tag_absent
+    tag: "(0008,0050)"        # AccessionNumber
+  - id: study-date-zeroed
+    type: tag_matches
+    tag: "(0008,0020)"        # StudyDate
+    pattern: "0*"
+    allow_absent: true
+  - id: no-private-tags
+    type: no_private_tags
+  - id: file-meta-consistent
+    type: file_meta_consistent
+  - id: instance-uids-remapped
+    # Every patient-linkable UID (SOP / Study / Series / FrameOfReference and
+    # any referenced instance UID) must be replaced with an Aegis-generated
+    # UID under the deterministic remap root. A UID outside this root is an
+    # original, institution-issued identifier that survived — linkable back to
+    # the source study. SOP-Class / Transfer-Syntax UIDs (DICOM standard root)
+    # are exempt. Deployments that customize the remap root override this root.
+    type: instance_uids_remapped
+    root: "1.2.826.0.1.3680043.8.498."
+
+run_checks:
+  - id: pixel-report-present
+    type: report_present
+    file: aegis_pixel_detections.csv
+  - id: pixel-report-phi-free
+    type: report_columns_forbidden
+    file: aegis_pixel_detections.csv
+    columns: [ocr_text]
+  - id: pixel-report-complete
+    type: report_columns_required
+    file: aegis_pixel_detections.csv
+    columns:
+      - source_path
+      - original_sop_uid
+      - deid_sop_uid
+      - text_token
+      - text_len
+      - decision
+  - id: tag-report-present
+    type: report_present
+    file: aegis_tag_actions.csv
+    severity: warning         # image-only runs have no DICOM header report
+  - id: outputs-accounted-in-tag-report
+    type: outputs_accounted_in_report
+    file: aegis_tag_actions.csv
+    column: deid_sop_uid

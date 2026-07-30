@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lakshmi-mahabaleshwara/aegis/monai_aegis/schemas/envelope.schema.json",
+  "title": "Aegis de-identification run envelope",
+  "description": "PHI-free machine-readable result of one Aegis de-identification invocation. Contains file names, paths, counts, decision categories, timings, and error messages only — never pixel data, OCR text, text tokens, or DICOM tag values.",
+  "type": "object",
+  "required": ["envelope_version", "tool", "status", "input", "output_dir"],
+  "additionalProperties": false,
+  "properties": {
+    "envelope_version": {"type": "string", "const": "1.0"},
+    "tool": {"type": "string", "const": "monai-aegis"},
+    "status": {"type": "string", "enum": ["success", "partial", "error"]},
+    "mode": {"type": "string", "enum": ["auto", "dicom", "image"]},
+    "input": {"type": "string"},
+    "output_dir": {"type": "string"},
+    "elapsed_seconds": {"type": "number", "minimum": 0},
+    "needs_manual_review": {"type": "boolean"},
+    "message": {"type": "string"},
+    "totals": {
+      "type": "object",
+      "required": [
+        "files_discovered", "files_processed", "files_failed",
+        "pixel_regions_detected", "pixel_decisions", "header_tags_scrubbed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "files_discovered": {"type": "integer", "minimum": 0},
+        "files_processed": {"type": "integer", "minimum": 0},
+        "files_failed": {"type": "integer", "minimum": 0},
+        "pixel_regions_detected": {"type": "integer", "minimum": 0},
+        "pixel_decisions": {"$ref": "#/$defs/pixel_decisions"},
+        "header_tags_scrubbed": {"type": "integer", "minimum": 0}
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/processed_file"},
+          {"$ref": "#/$defs/failed_file"}
+        ]
+      }
+    },
+    "reports": {"type": "array", "items": {"type": "string"}},
+    "errors": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "pixel_decisions": {
+      "type": "object",
+      "required": ["redacted", "safelisted", "low_confidence"],
+      "additionalProperties": {"type": "integer", "minimum": 0},
+      "properties": {
+        "redacted": {"type": "integer", "minimum": 0},
+        "safelisted": {"type": "integer", "minimum": 0},
+        "low_confidence": {"type": "integer", "minimum": 0}
+      }
+    },
+    "processed_file": {
+      "type": "object",
+      "required": [
+        "source_file", "kind", "status", "artifacts",
+        "pixel_regions_detected", "pixel_decisions",
+        "header_tags_scrubbed", "needs_manual_review"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source_file": {"type": "string"},
+        "kind": {"type": "string", "enum": ["dicom", "image"]},
+        "status": {"type": "string", "const": "processed"},
+        "artifacts": {"type": "array", "items": {"type": "string"}},
+        "pixel_regions_detected": {"type": "integer", "minimum": 0},
+        "pixel_decisions": {"$ref": "#/$defs/pixel_decisions"},
+        "header_tags_scrubbed": {"type": "integer", "minimum": 0},
+        "needs_manual_review": {"type": "boolean"}
+      }
+    },
+    "failed_file": {
+      "type": "object",
+      "required": ["source_file", "kind", "status", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "source_file": {"type": "string"},
+        "kind": {"type": "string", "enum": ["dicom", "image"]},
+        "status": {"type": "string", "const": "failed"},
+        "error": {"type": "string"}
+      }
+    }
+  }
+}

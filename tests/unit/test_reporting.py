@@ -78,6 +78,64 @@ def test_extract_series_maps_frame_index_to_slice_sop():
     assert [r["original_sop_uid"] for r in tag_rows] == ["1.2.O0", "1.2.O1"]
 
 
+def test_extract_series_attributes_source_path_per_slice():
+    # Multi-file series: each row's source_path must point at the slice it
+    # came from, not always the first slice.
+    data = {
+        "image_meta_dict": {
+            "filename_or_obj": "/in/series/slice_0.dcm",
+            "slice_uris": ["/in/series/slice_0.dcm", "/in/series/slice_1.dcm"],
+        },
+        "image_dicom_datasets": [_ds("1.2.O0"), _ds("1.2.O1")],
+        "image_scrubbed_datasets": [_ds("1.2.D0"), _ds("1.2.D1")],
+        "image_redaction_stats": {
+            "detections": [
+                {"bbox": [1, 1, 2, 2], "ocr_text": "X", "confidence": 0.9,
+                 "decision": "redacted", "frame_index": 1},
+            ],
+        },
+        "image_tag_actions_per_slice": [
+            [{"tag": "(0010,0020)", "keyword": "PatientID", "action": "DUMMY", "redacted": True}],
+            [{"tag": "(0010,0020)", "keyword": "PatientID", "action": "DUMMY", "redacted": True}],
+        ],
+    }
+
+    pixel_rows, tag_rows = reporting.extract_records(data)
+
+    # Pixel detection on frame 1 attributes to slice_1, keyed to slice_1's UIDs.
+    assert pixel_rows[0]["source_path"] == "/in/series/slice_1.dcm"
+    assert pixel_rows[0]["original_sop_uid"] == "1.2.O1"
+    # Tag rows attribute to their own slice, index-aligned.
+    assert [r["source_path"] for r in tag_rows] == [
+        "/in/series/slice_0.dcm", "/in/series/slice_1.dcm",
+    ]
+
+
+def test_extract_series_without_slice_uris_falls_back_to_single_path():
+    # Back-compat: absent slice_uris (e.g. multi-frame single file), every row
+    # resolves to the one real source path.
+    data = {
+        "image_meta_dict": {"filename_or_obj": "/in/multiframe.dcm"},
+        "image_dicom_datasets": [_ds("1.2.O0"), _ds("1.2.O1")],
+        "image_scrubbed_datasets": [_ds("1.2.D0"), _ds("1.2.D1")],
+        "image_redaction_stats": {
+            "detections": [
+                {"bbox": [1, 1, 2, 2], "ocr_text": "X", "confidence": 0.9,
+                 "decision": "redacted", "frame_index": 1},
+            ],
+        },
+        "image_tag_actions_per_slice": [
+            [{"tag": "(0010,0020)", "keyword": "PatientID", "action": "DUMMY", "redacted": True}],
+            [{"tag": "(0010,0020)", "keyword": "PatientID", "action": "DUMMY", "redacted": True}],
+        ],
+    }
+
+    pixel_rows, tag_rows = reporting.extract_records(data)
+
+    assert pixel_rows[0]["source_path"] == "/in/multiframe.dcm"
+    assert {r["source_path"] for r in tag_rows} == {"/in/multiframe.dcm"}
+
+
 def test_extract_empty_dict_is_safe():
     pixel_rows, tag_rows = reporting.extract_records({})
     assert pixel_rows == []

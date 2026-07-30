@@ -88,17 +88,19 @@ class TestConcurrentScrubAuditIsolation(unittest.TestCase):
         self.assertEqual(len(results['a']), N_ITERATIONS)
         self.assertEqual(len(results['b']), N_ITERATIONS)
         # Every audit trail for 'a' mentions exactly its own tag, never
-        # b's, followed by the PS3.15 attestation rows stamped on every
-        # scrub (no BurnedInAnnotation: no pixel data in these calls).
-        attest = [
+        # b's, then the SOP Instance UID remap (every dataset carries one),
+        # then the PS3.15 attestation rows stamped on every scrub (no
+        # BurnedInAnnotation: no pixel data in these calls).
+        tail = [
+            'SOPInstanceUID',
             'PatientIdentityRemoved',
             'DeidentificationMethod',
             'DeidentificationMethodCodeSequence',
         ]
         for keywords in results['a']:
-            self.assertEqual(keywords, ['PatientName'] + attest)
+            self.assertEqual(keywords, ['PatientName'] + tail)
         for keywords in results['b']:
-            self.assertEqual(keywords, ['PatientID'] + attest)
+            self.assertEqual(keywords, ['PatientID'] + tail)
 
     def test_no_audit_state_left_on_instance(self):
         ds = _make_dataset(patient_name='Alice Anderson')

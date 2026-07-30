@@ -1,0 +1,5 @@
+# Ensure non-Python data files ship in the source distribution (sdist).
+# Wheels get these via [tool.setuptools.package-data] in pyproject.toml;
+# this covers the sdist path as well.
+recursive-include src/monai_aegis *.yaml *.json
+include README.md LICENSE NOTICE CHANGELOG.md

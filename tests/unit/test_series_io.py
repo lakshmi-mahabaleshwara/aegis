@@ -173,7 +173,7 @@ class TestLoadDicomSeriesd(unittest.TestCase):
 class TestSaveDicomSeries(unittest.TestCase):
     """Test the SaveDicomSeries array transform."""
 
-    def test_saves_series_with_regenerated_uids(self):
+    def test_saves_series_preserves_uids_and_syncs_file_meta(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create a fake input directory with original files
             input_dir = os.path.join(tmpdir, 'input', 'sub')
@@ -205,9 +205,19 @@ class TestSaveDicomSeries(unittest.TestCase):
                 # Verify folder structure preserved: output/sub/slice_X.dcm
                 self.assertIn('sub', p)
 
-            # SOPInstanceUIDs should have been regenerated
+            # SaveDicomSeries persists SOPInstanceUIDs as-is — regeneration is
+            # the metadata-scrub transform's job, not the saver's.
             for ds, orig_uid in zip(datasets, original_uids):
-                self.assertNotEqual(ds.SOPInstanceUID, orig_uid)
+                self.assertEqual(ds.SOPInstanceUID, orig_uid)
+
+            # Written file_meta must stay consistent with the dataset UID
+            # (force=True: these minimal fixtures omit the 128-byte preamble).
+            for p in paths:
+                out = pydicom.dcmread(p, force=True)
+                self.assertEqual(
+                    str(out.file_meta.MediaStorageSOPInstanceUID),
+                    str(out.SOPInstanceUID),
+                )
 
 
 if __name__ == '__main__':

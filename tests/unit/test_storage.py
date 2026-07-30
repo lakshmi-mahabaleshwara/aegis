@@ -11,8 +11,6 @@ import pydicom
 import pydicom.uid
 import numpy as np
 
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'monai_aegis'))
 
 from monai_aegis.config.storage import AegisFileSystem
 
@@ -110,6 +108,34 @@ class TestAegisFileSystemFromConfig(unittest.TestCase):
         }
         fs = AegisFileSystem.from_config(config)
         self.assertEqual(fs.protocol, 'file')
+
+
+class TestExperimentalStorageWarning(unittest.TestCase):
+    """Non-file protocols announce their experimental status once per process."""
+
+    _LOGGER = "monai_aegis.config.storage"
+
+    def setUp(self):
+        from monai_aegis.config import storage as storage_mod
+        self._storage_mod = storage_mod
+        storage_mod._experimental_warned.clear()
+
+    def tearDown(self):
+        self._storage_mod._experimental_warned.clear()
+
+    def test_remote_protocol_warns_and_only_once(self):
+        with self.assertLogs(self._LOGGER, level="WARNING") as cm:
+            AegisFileSystem(protocol="memory")
+        blob = "\n".join(cm.output)
+        self.assertIn("EXPERIMENTAL", blob)
+        self.assertIn("memory", blob)
+        # Same protocol again in the same process must not re-warn.
+        with self.assertNoLogs(self._LOGGER, level="WARNING"):
+            AegisFileSystem(protocol="memory")
+
+    def test_file_protocol_is_silent(self):
+        with self.assertNoLogs(self._LOGGER, level="WARNING"):
+            AegisFileSystem(protocol="file")
 
 
 class TestAegisFileSystemMemory(unittest.TestCase):

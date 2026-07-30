@@ -138,5 +138,179 @@ class TestScrubDicomMetadata(unittest.TestCase):
         for elem in nested_scrubbed:
             self.assertFalse(elem.tag.is_private, "Nested private tags should be removed")
 
+
+# Roots used to tell apart "original, institution-issued" UIDs from the ones
+# the scrubber generates. Foreign root = a value that must be replaced;
+# pydicom root = where remap_uid lands; standard root = preserved verbatim.
+_FOREIGN_ROOT = "1.2.840.113619.2.55.3."      # e.g. a GE-issued UID root
+_PYDICOM_ROOT = "1.2.826.0.1.3680043.8.498."  # generate_uid() default root
+_STD_ROOT = "1.2.840.10008"                   # DICOM standard (class) root
+
+
+class TestUidGraphRemap(unittest.TestCase):
+    """The scrubber replaces every patient-linkable UID (PS3.15 action U)."""
+
+    def setUp(self):
+        # These tests set the salt via config, which is authoritative
+        # (AegisIdentityManager: config salt wins over AEGIS_TOKEN_SALT). We
+        # still neutralize any ambient env salt so the tests stay hermetic and
+        # independent of precedence details, restoring it afterwards.
+        self._saved_salt = os.environ.pop("AEGIS_TOKEN_SALT", None)
+
+    def tearDown(self):
+        if self._saved_salt is not None:
+            os.environ["AEGIS_TOKEN_SALT"] = self._saved_salt
+        else:
+            os.environ.pop("AEGIS_TOKEN_SALT", None)
+
+    def _make_ds(self, sop="1", study="100", series="200", frame="300", salt="s1"):
+        ds = Dataset()
+        ds.PatientName = "Test^Patient"
+        ds.SOPClassUID = _STD_ROOT + ".5.1.4.1.1.7"
+        ds.SOPInstanceUID = _FOREIGN_ROOT + sop
+        ds.StudyInstanceUID = _FOREIGN_ROOT + study
+        ds.SeriesInstanceUID = _FOREIGN_ROOT + series
+        ds.FrameOfReferenceUID = _FOREIGN_ROOT + frame
+        ref = Dataset()
+        ref.ReferencedSOPClassUID = _STD_ROOT + ".5.1.4.1.1.7"
+        # Points at the study UID value on purpose — used to prove that a UID
+        # reused across the object is rewritten to the same replacement.
+        ref.ReferencedSOPInstanceUID = _FOREIGN_ROOT + study
+        ds.add_new((0x0008, 0x1140), "SQ", Sequence([ref]))  # ReferencedImageSequence
+        fm = FileMetaDataset()
+        fm.MediaStorageSOPClassUID = ds.SOPClassUID
+        fm.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+        fm.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+        ds.file_meta = fm
+        return ds
+
+    def _scrub(self, ds, salt="s1"):
+        cfg = {"pii_mapping": {}, "tokenization": {"salt": salt}}
+        return ScrubDicomMetadata(config=cfg).scrub("f.dcm", dataset=ds)
+
+    def test_all_patient_linkable_uids_are_remapped(self):
+        out, _ = self._scrub(self._make_ds())
+        for keyword in ("SOPInstanceUID", "StudyInstanceUID",
+                        "SeriesInstanceUID", "FrameOfReferenceUID"):
+            value = str(getattr(out, keyword))
+            self.assertTrue(value.startswith(_PYDICOM_ROOT),
+                            f"{keyword} not remapped: {value}")
+            self.assertFalse(value.startswith(_FOREIGN_ROOT),
+                             f"{keyword} kept its original value")
+
+    def test_class_and_standard_root_uids_are_preserved(self):
+        out, _ = self._scrub(self._make_ds())
+        self.assertEqual(str(out.SOPClassUID), _STD_ROOT + ".5.1.4.1.1.7")
+        self.assertEqual(str(out.file_meta.MediaStorageSOPClassUID),
+                         _STD_ROOT + ".5.1.4.1.1.7")
+        ref = out[(0x0008, 0x1140)].value[0]
+        self.assertEqual(str(ref.ReferencedSOPClassUID), _STD_ROOT + ".5.1.4.1.1.7")
+
+    def test_file_meta_stays_consistent(self):
+        out, _ = self._scrub(self._make_ds())
+        self.assertEqual(str(out.file_meta.MediaStorageSOPInstanceUID),
+                         str(out.SOPInstanceUID))
+
+    def test_shared_uid_rewritten_consistently_preserving_references(self):
+        # ReferencedSOPInstanceUID held the same value as StudyInstanceUID in
+        # the input; both must land on the identical replacement so the
+        # cross-reference still resolves after de-identification.
+        out, _ = self._scrub(self._make_ds())
+        ref = out[(0x0008, 0x1140)].value[0]
+        self.assertEqual(str(ref.ReferencedSOPInstanceUID),
+                         str(out.StudyInstanceUID))
+
+    def test_remap_is_deterministic_across_instances(self):
+        out1, _ = self._scrub(self._make_ds(), salt="same")
+        out2, _ = self._scrub(self._make_ds(), salt="same")
+        self.assertEqual(str(out1.StudyInstanceUID), str(out2.StudyInstanceUID))
+        self.assertEqual(str(out1.SeriesInstanceUID), str(out2.SeriesInstanceUID))
+        self.assertEqual(str(out1.SOPInstanceUID), str(out2.SOPInstanceUID))
+
+    def test_salt_changes_the_mapping(self):
+        out1, _ = self._scrub(self._make_ds(), salt="salt-a")
+        out2, _ = self._scrub(self._make_ds(), salt="salt-b")
+        self.assertNotEqual(str(out1.StudyInstanceUID), str(out2.StudyInstanceUID))
+
+    def test_two_slices_share_series_uid_but_differ_by_instance(self):
+        # Same series, different instances → same remapped SeriesInstanceUID,
+        # distinct remapped SOPInstanceUIDs. This is the series-linkage contract.
+        out1, _ = self._scrub(self._make_ds(sop="1"), salt="k")
+        out2, _ = self._scrub(self._make_ds(sop="2"), salt="k")
+        self.assertEqual(str(out1.SeriesInstanceUID), str(out2.SeriesInstanceUID))
+        self.assertNotEqual(str(out1.SOPInstanceUID), str(out2.SOPInstanceUID))
+
+    def test_remap_actions_are_audited(self):
+        _, actions = self._scrub(self._make_ds())
+        remapped = {a["keyword"] for a in actions if a["action"] == "REMAP"}
+        self.assertEqual(
+            remapped,
+            {"SOPInstanceUID", "StudyInstanceUID", "SeriesInstanceUID",
+             "FrameOfReferenceUID", "ReferencedSOPInstanceUID"},
+        )
+        self.assertTrue(all(a["redacted"] for a in actions if a["action"] == "REMAP"))
+
+    def test_missing_sop_uid_is_minted(self):
+        ds = self._make_ds()
+        del ds.SOPInstanceUID
+        del ds.file_meta.MediaStorageSOPInstanceUID
+        out, _ = self._scrub(ds)
+        self.assertTrue(str(out.SOPInstanceUID).startswith(_PYDICOM_ROOT))
+        self.assertEqual(str(out.file_meta.MediaStorageSOPInstanceUID),
+                         str(out.SOPInstanceUID))
+
+
+class TestDummyTokenFitsVr(unittest.TestCase):
+    """A DUMMY token must conform to the target element's VR length limit.
+
+    ``TOKEN_`` + 16 hex = 22 chars overflows the 16-char VRs (SH/AE/CS);
+    over-length values are non-conformant and rejected by strict readers.
+    """
+
+    def _scrub(self, ds, salt="fit"):
+        cfg = {
+            "pii_mapping": {
+                "(0020,0010)": "DUMMY",  # StudyID  -> SH (16)
+                "(0010,0020)": "DUMMY",  # PatientID -> LO (64)
+                "(0010,0010)": "DUMMY",  # PatientName -> PN (64)
+            },
+            "tokenization": {"salt": salt},
+        }
+        return ScrubDicomMetadata(config=cfg).scrub("f.dcm", dataset=ds)
+
+    def _make_ds(self, study="788962607"):
+        ds = Dataset()
+        ds.StudyID = study
+        ds.PatientID = "3809/2025"
+        ds.PatientName = "MR.PATIENT 76Y"
+        return ds
+
+    def test_sh_token_truncated_to_16(self):
+        out, _ = self._scrub(self._make_ds())
+        value = str(out.StudyID)
+        self.assertLessEqual(len(value), 16)
+        self.assertTrue(value.startswith("TOKEN_"))
+
+    def test_long_vrs_keep_full_token(self):
+        out, _ = self._scrub(self._make_ds())
+        # LO/PN comfortably hold the full 22-char token — must not be truncated.
+        self.assertEqual(len(str(out.PatientID)), len("TOKEN_") + 16)
+        self.assertEqual(len(str(out.PatientName)), len("TOKEN_") + 16)
+
+    def test_sh_truncation_is_deterministic(self):
+        out1, _ = self._scrub(self._make_ds(), salt="k")
+        out2, _ = self._scrub(self._make_ds(), salt="k")
+        self.assertEqual(str(out1.StudyID), str(out2.StudyID))
+
+    def test_no_overflow_warning_emitted(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self._scrub(self._make_ds())
+        overflow = [w for w in caught if "exceeds the maximum length" in str(w.message)]
+        self.assertEqual(overflow, [], "SH token still overflows the VR length limit")
+
+
 if __name__ == '__main__':
     unittest.main()
