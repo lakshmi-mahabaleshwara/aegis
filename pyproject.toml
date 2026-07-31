@@ -49,7 +49,10 @@ cloud = [
 ]
 # Model Context Protocol server (monai_aegis.mcp_server; run via `aegis-mcp`).
 mcp = [
-    "mcp[cli]>=1.0.0",
+    # Cap below 2.0: mcp 2.0.0 removed `mcp.server.fastmcp` (a breaking change),
+    # which the server and its tests import. Lift once the code migrates to the
+    # 2.x FastMCP location.
+    "mcp[cli]>=1.0.0,<2.0.0",
 ]
 dev = [
     "pytest>=7.0.0",

@@ -70,8 +70,12 @@ Typical workflow: `warm_up` → `deidentify_file` or `start_batch_job` → poll
 `staging_output/mcp/<job_id>/`.
 
 If the MCP server is configured but failing to start, the usual cause is an
-unset `AEGIS_ROOT` environment variable or a missing venv — check those before
-debugging further.
+unset `AEGIS_ROOT` environment variable or a missing venv. The plugin's
+`.mcp.json` launches `${AEGIS_ROOT}/venv/bin/aegis-mcp`, so `AEGIS_ROOT` must
+point at the Aegis checkout — set it durably in your shell profile
+(`export AEGIS_ROOT=/path/to/aegis` in `~/.zshrc`) — and that checkout must
+contain a `venv` with the package installed (`pip install -e ".[mcp]"`). Check
+those before debugging further.
 
 ## Fallback path: CLI
 
@@ -79,12 +83,26 @@ When the MCP server is not connected, run the pipeline directly from the Aegis
 root (activate `venv` first):
 
 ```bash
-# Unified orchestrator — DICOM + images, series-aware (recommended).
+# Preferred fallback — de-identify a file OR directory, emitting a PHI-free
+# JSON envelope on stdout (the same shape the MCP deidentify_file tool returns,
+# so PHI never lands in the transcript). Behavior is config-driven via --overlay.
+aegis-deidentify /path/to/input --output-dir /path/to/out
+
+# Independently verify a de-identified run against the packaged PS3.15
+# checklist — PHI-free JSON report on stdout. Use this to audit/attest a run.
+aegis-verify /path/to/out
+
+# Generate a synthetic fixture (fake burnt-in text + fake header PHI) so the
+# pipeline can be exercised WITHOUT real patient data — ideal for demos/tests.
+# Never a substitute for real de-identification; it only produces test inputs.
+aegis-fixture demo.dcm --text "SYNTHETIC PATIENT" --text "ID SYN-0001"
+
+# Batch orchestrator — DICOM + images, series-aware, timestamped output dirs.
 # --config defaults to the packaged config.yaml and works from any directory;
 # pass --config only to point at a custom overlay.
 aegis-pipeline --mode auto
 
-# Single pipelines
+# Low-level single pipelines (rarely needed; prefer aegis-deidentify above)
 python -m monai_aegis.dicom_runner                    # series mode
 python -m monai_aegis.dicom_runner --mode single
 python -m monai_aegis.image_runner

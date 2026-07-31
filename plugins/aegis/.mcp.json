@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "aegis": {
-      "command": "${AEGIS_ROOT}/venv/bin/python",
-      "args": ["${AEGIS_ROOT}/aegis_mcp_server.py"],
+      "command": "${AEGIS_ROOT}/venv/bin/aegis-mcp",
+      "args": [],
       "env": {
         "AEGIS_OUTPUT_DIR": "${AEGIS_ROOT}/staging_output",
         "AEGIS_REVIEW_DIR": "${AEGIS_ROOT}/staging_not_processed",

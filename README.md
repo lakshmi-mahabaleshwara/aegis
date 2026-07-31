@@ -560,8 +560,8 @@ any time.
 {
   "mcpServers": {
     "aegis": {
-      "command": "/path/to/aegis/venv/bin/python",
-      "args": ["/path/to/aegis/aegis_mcp_server.py"],
+      "command": "/path/to/aegis/venv/bin/aegis-mcp",
+      "args": [],
       "env": {
         "AEGIS_OUTPUT_DIR": "/path/to/aegis/staging_output",
         "AEGIS_REVIEW_DIR": "/path/to/aegis/staging_not_processed",
@@ -575,13 +575,13 @@ any time.
 **MCP Inspector** (manual/debug testing):
 
 ```bash
-npx @modelcontextprotocol/inspector venv/bin/python aegis_mcp_server.py
+npx @modelcontextprotocol/inspector venv/bin/aegis-mcp
 ```
 
 **Open WebUI + Ollama** (via the mcpo OpenAPI bridge):
 
 ```bash
-uvx mcpo --port 8000 -- venv/bin/python aegis_mcp_server.py
+uvx mcpo --port 8000 -- venv/bin/aegis-mcp
 # Open WebUI → Settings → Tools → add http://localhost:8000
 # (use http://host.docker.internal:8000 when Open WebUI runs in Docker)
 # Use a tool-capable model, e.g. qwen2.5:7b
@@ -602,26 +602,35 @@ server with an unpredictable working directory), and `AEGIS_DEVICE`
 
 This repository doubles as a [Claude Code plugin marketplace](https://docs.anthropic.com/en/docs/claude-code/plugins).
 The `aegis` plugin bundles an **agent skill** (`aegis-deid`, teaching Claude
-the de-identification workflow, CLI fallback, and PHI-handling guardrails)
-and an **MCP registration** for `aegis_mcp_server.py`.
+the de-identification workflow, CLI fallback, and PHI-handling guardrails),
+three **slash commands** (`/aegis-deidentify`, `/aegis-verify`,
+`/aegis-fixture`), and an **MCP registration** that launches the `aegis-mcp`
+console command.
 
 ```bash
-# 1. Optional: pin where the server writes output/review files (add to your shell
-#    profile). Absolute paths are recommended so files land in a known place
-#    regardless of the host's launch directory.
-export AEGIS_OUTPUT_DIR=/path/to/aegis/staging_output          # optional
-export AEGIS_REVIEW_DIR=/path/to/aegis/staging_not_processed   # optional
-export AEGIS_DEVICE=mps                  # optional: cpu (default) / mps / cuda
+# 1. Point AEGIS_ROOT at your Aegis checkout — REQUIRED. The plugin's MCP
+#    registration launches "$AEGIS_ROOT/venv/bin/aegis-mcp", so the server
+#    will not start if it is unset. Add it to your shell profile (~/.zshrc)
+#    so every session resolves it:
+export AEGIS_ROOT=/path/to/aegis
+
+#    Optional tuning (the plugin defaults output/review to
+#    $AEGIS_ROOT/staging_output and $AEGIS_ROOT/staging_not_processed):
+export AEGIS_DEVICE=mps                                        # cpu (default) / mps / cuda
+export AEGIS_OUTPUT_DIR=/path/to/aegis/staging_output          # override output dir
+export AEGIS_REVIEW_DIR=/path/to/aegis/staging_not_processed   # override review dir
 
 # 2. Inside Claude Code:
 #    /plugin marketplace add lakshmi-mahabaleshwara/aegis
 #    /plugin install aegis@aegis
 ```
 
-Installing the plugin registers the six MCP tools above in Claude Code and
-enables the skill for natural-language use ("de-identify this DICOM folder").
-This is independent of Claude Desktop — an existing `claude_desktop_config.json`
-entry keeps working unchanged, and each client spawns its own server process.
+Installing the plugin registers the six MCP tools above, the `aegis-deid`
+skill, and the `/aegis-deidentify` · `/aegis-verify` · `/aegis-fixture` slash
+commands in Claude Code — enabling both natural-language use ("de-identify this
+DICOM folder") and explicit command invocation. This is independent of Claude
+Desktop — an existing `claude_desktop_config.json` entry keeps working
+unchanged, and each client spawns its own server process.
 
 ---
 
