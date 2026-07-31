@@ -9,6 +9,7 @@ pydicom datasets and CSVs — no models, no pipeline.
 
 import csv
 import json
+from pathlib import Path
 
 import pydicom
 import pytest

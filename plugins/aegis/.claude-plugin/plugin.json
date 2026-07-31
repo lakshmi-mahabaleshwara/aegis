@@ -1,6 +1,6 @@
 {
   "name": "aegis",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "De-identify medical images (DICOM, JPEG, PNG) with the Aegis pipeline — PHI removal from pixels and headers, batch jobs, audits, and review-queue management via MCP tools or CLI.",
   "author": {
     "name": "Lakshmi Mahabaleshwara",
