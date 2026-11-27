@@ -35,6 +35,24 @@ docker build -f docker/Dockerfile -t monai_aegis:v1.0 .
 docker build --no-cache -f docker/Dockerfile -t monai_aegis:latest .
 ```
 
+### Pinned Versions
+
+Builds are reproducible: the same Dockerfile produces the same software today
+and next month.
+
+- **Base image** is pinned by digest in the `FROM` line
+  (`python:3.10.22-slim-trixie@sha256:…`).
+- **Python packages** are pinned in [`constraints.txt`](constraints.txt), applied
+  with `pip install -c`. It lists every resolved package, including
+  transitive ones such as torch's CUDA libraries, at an exact version.
+- **apt packages** (`libgl1`, `libglib2.0-0`, `libgomp1`) are not pinned,
+  because Debian drops old versions from its mirrors. They come from the
+  pinned base image's Debian release.
+
+To upgrade, edit the versions in `constraints.txt` (or the `FROM` digest),
+rebuild, and re-run the pipeline in the container. Then regenerate the file
+from the new image with the command in its header.
+
 ### Run Modes
 
 #### 1. Process Files from Host Directory
