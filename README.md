@@ -98,7 +98,9 @@ The pipeline processes files through two distinct paths:
 
 **Image Path** — Load Image → Pixel Redaction (OCR + NER on full image) → Save. No metadata scrub since JPEG/PNG files have no DICOM tags.
 
-Low-confidence OCR detections on either path are routed to `staging_not_processed/` for manual review.
+Low-confidence OCR detections on either path are routed to `staging_not_processed/` for manual review. For a multi-file series or an image folder, the whole series/folder goes to review and none of it is released.
+
+Multi-frame DICOMs (e.g. ultrasound cine loops) are loaded as `(C, frames, H, W)` volumes on both the single-file and series paths, so keyframe OCR and the union mask cover every frame.
 
 ### Component Overview
 
@@ -222,6 +224,7 @@ ocr:
   languages: ['en']
   gpu_usage: false
   confidence_threshold: 0.4
+  redaction_padding: 1.5          # max sideways growth over adjacent same-colour text (text heights); 0 = off
   model_storage_directory: '${AEGIS_OCR_MODEL_DIR:}'      # pre-bundled EasyOCR weights dir
   download_enabled: '${AEGIS_MODEL_DOWNLOADS:true}'       # false → never download at runtime
 
@@ -232,6 +235,8 @@ ner:
                                   # pinned so the model cannot silently change under a deployment
   local_files_only: '${AEGIS_HF_OFFLINE:false}'  # true → resolve from local HF cache, zero network calls
   device: '${AEGIS_DEVICE:cpu}'   # 'cpu', 'cuda', or 'mps'
+  line_context: true              # also classify each OCR line's fragments together
+  line_gap_ratio: 1.5             # max gap between fragments of one line (text heights)
   phi_labels:                     # NER entity types treated as PHI — must be labels
     - PATIENT                     # the model emits (checked at startup). The pinned
     - HCW                         # model emits PATIENT, HCW (doctors/staff), HOSPITAL,
@@ -343,6 +348,18 @@ When `ner.enabled: true`, each OCR-detected text goes through a layered pipeline
 | 2. Clinical patterns | `ner.clinical_patterns` | **Preserve** | `FH5.0`, `D 13.0`, `SC5-1N` |
 | 3. PHI heuristics | `ner.phi_heuristic_patterns` | **Redact** | `20260117-091825-6AAA` |
 | 4. Stanford NER | `ner.phi_labels` | **Redact if PHI** | Names, remaining identifiers |
+| 5. Line context | `ner.line_context` | **Redact** fragments inside a PHI span of their line | `Brandy S.` after `Robinson,`; `23:16` after a date |
+
+OCR returns a text line as separate fragments, and a fragment judged alone
+can lose what makes it PHI. Layer 5 joins the fragments of each line (same
+row, gap ≤ `ner.line_gap_ratio` text heights, so separate columns stay
+apart), finds PHI spans in the joined line with layers 0, 3 and 4, and
+redacts every fragment a span covers. It only adds redaction; a fragment
+preserved by layers 1–2 stays visible. To cover short tokens OCR drops
+(the `S.` in `Brandy S.`), a redaction box also grows sideways over
+adjacent pixels of its own text colour, up to `ocr.redaction_padding`
+text heights (default 1.5); it stops at a gap wider than a word space and
+never reaches kept text or other image content.
 
 ### PII Mapping Actions
 | Action | Behavior | Example |

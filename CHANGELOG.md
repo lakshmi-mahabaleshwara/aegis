@@ -10,6 +10,41 @@ that affect output are called out explicitly under **Changed**.
 ## [Unreleased]
 
 ### Fixed
+- **Burnt-in PHI was not redacted in multi-frame DICOMs (cine loops).**
+  A multi-frame file is its own one-file series, so it runs through the
+  single-file pipeline, whose loader (`LoadDicomRaw`) only reshaped 2D and
+  single-frame RGB arrays. RGB cine loops `(frames, H, W, 3)` were then
+  read with the wrong axes: keyframe OCR scanned image rows instead of
+  frames, never saw the overlay text, and the file was written with 0
+  pixels changed, not sent to review, and still stamped as pixel-redacted.
+  Grayscale cine loops crashed EasyOCR and went to review. The loader now
+  converts both to `(C, frames, H, W)` volumes using `SamplesPerPixel`
+  (as pydicom does), the header-scrub step writes them back as
+  multi-frame, and any other layout fails closed. `RedactPixelPHI` also
+  rejects a 4-D array whose channel axis is not 1 or 3, so a mis-shaped
+  volume is quarantined instead of passed through. Affects the runners
+  (both modes), `aegis-deidentify` and the MCP server.
+- **Partial names and times were left visible.** OCR returns a text line
+  as separate word groups ("Robinson," / "Brandy S.", "08/01/2021" /
+  "23:16"), and each was classified alone, without the context that makes
+  it PHI, so a first name or a time beside a redacted surname or date was
+  kept. Fragments on the same line are now also classified together
+  (`ner.line_context`, default on): PHI spans are located in the joined
+  line and every fragment they cover is redacted. It only adds redaction;
+  fragments matching the clinical allowlist/patterns stay kept, and
+  separate columns (e.g. scanner settings) are not joined. OCR also drops
+  very short tokens next to longer ones (the "S." in "Brandy S."), so a
+  redaction box now also grows sideways over adjacent pixels of its own
+  text colour — up to `ocr.redaction_padding` text heights (default 1.5),
+  stopping at a gap wider than a word space and never into kept text.
+  Background and image content beside the text (e.g. an ultrasound fan)
+  are not touched. The pixel report still records the OCR box.
+- **Low-confidence text in a multi-file series no longer slips through.**
+  Single files and single images with low-confidence OCR regions went to
+  review, but multi-file DICOM series and image folders were released
+  regardless. They now follow the same rule: the whole series/folder is
+  copied to the review folder, and any output already written for it is
+  removed. The series summary log now reports `Not processed`.
 - **Burnt-in names were not redacted under transformers 5.** transformers 5
   loads the pinned Stanford NER model's (uncased) tokenizer with
   `do_lower_case=False`, so every capitalized word became `[UNK]` and the
@@ -37,6 +72,15 @@ that affect output are called out explicitly under **Changed**.
   `F 57Y` as an ultrasound frequency setting.
 - Pixel redaction output changes as a result of the three items above: more
   regions (names, doctors, hospitals, IDs, ages) are redacted.
+- Multi-frame DICOMs now get real OCR, so they take longer and redact
+  more: up to 25 actual frames per file go through OCR + NER (about 20 s
+  per cine loop on CPU, vs. ~2 s when the frames were misread), and
+  burnt-in PHI is removed from every frame. Grayscale cine loops that used
+  to land in the review queue with an OCR error are now processed.
+- The vendor string written by `notebooks/synthetic_phi_generation.ipynb`
+  (`SYNTHETIC-DEID-TUTORIAL`) is no longer redacted from burnt-in text. NER
+  tagged its all-caps words as a person (`HCW`); a fully anchored
+  `ner.clinical_patterns` entry now keeps exactly that string.
 
 ## [0.2.0] - 2026-07-24
 

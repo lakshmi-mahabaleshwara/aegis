@@ -66,6 +66,13 @@ ocr:
   decoder: 'beamsearch'
   beam_width: 5
   confidence_threshold: 0.4
+  # OCR drops very short tokens beside longer ones, e.g. the middle initial
+  # in "Brandy S.", so they are never classified and stay visible next to a
+  # redacted name. A redacted box therefore also grows left/right over
+  # adjacent pixels of its own text colour, by at most this many text
+  # heights (0 = off). It stops at a gap wider than a word space and never
+  # reaches kept text; background and image content are left alone.
+  redaction_padding: 1.5
   languages: ['en']
   gpu_usage: false
   # Air-gapped deployment: point at a pre-bundled EasyOCR weights directory
@@ -87,6 +94,15 @@ ner:
   # Prefetch with scripts/prefetch_models.py first.
   local_files_only: '${AEGIS_HF_OFFLINE:false}'
   device: '${AEGIS_DEVICE:cpu}'  # options: 'cpu', 'cuda', 'mps'
+
+  # Line context. OCR splits a text line into word groups, and a fragment
+  # judged alone can lose what makes it PHI: "Brandy S." after "Robinson,",
+  # "23:16" after a date. With line_context on, fragments on the same line
+  # are also classified together, and every fragment inside a PHI span found
+  # in the joined line is redacted. It only adds redaction, never removes
+  # it, and fragments matching the clinical allowlist/patterns stay kept.
+  line_context: true
+  line_gap_ratio: 1.5   # max gap between fragments of one line, in text heights
 
   # NER entity types treated as PHI (text matching these → redacted).
   # These must be labels the model above actually emits: a PHI label missing
@@ -157,6 +173,12 @@ ner:
     - '^\d+\.\d+$'                                      # Standalone decimals
     - '^\d+\.?\d*\s*(cm|mm|MHz)$'                       # Measurements
     - '(?i)^(Adult|Pediatric)\s+(ABD|OB|GYN|CARD)'      # Exam types
+    # Vendor string burnt in by notebooks/synthetic_phi_generation.ipynb
+    # (OCR reads it as "SYNTHETIC - DEID - TUTOR"). NER tags its unfamiliar
+    # all-caps words as HCW (a person), so it needs an explicit keep rule.
+    # Anchored at both ends: a fragment that also carries other text is
+    # still classified normally.
+    - '(?i)^SYNTHETIC[\s-]*DEID[\s-]*TUTOR(IAL)?$'
 
   # Heuristic regex patterns for PHI in short OCR fragments (redacted)
   phi_heuristic_patterns:

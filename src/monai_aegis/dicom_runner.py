@@ -168,6 +168,35 @@ def _cleanup_output(data_dict: dict[str, Any], paths: RunnerPaths, file_path: st
         os.remove(out_path)
 
 
+def _handle_low_confidence_series(
+    data_dict: dict[str, Any], paths: RunnerPaths, summary: RunSummary, label: str
+) -> bool:
+    """Send a whole series to review when OCR found text it could not read confidently.
+
+    Same rule as single files (:func:`_handle_single_result`): a
+    low-confidence region may be PHI the classifier never saw, so the
+    series is not released. Every source slice is copied to the review
+    folder and every output slice already written is removed.
+
+    Returns:
+        True if the series was sent to review.
+    """
+    stats_dict = data_dict.get(ck("image", ckeys.REDACTION_STATS), {}) or {}
+    if stats_dict.get("low_confidence_count", 0) <= 0:
+        return False
+    meta = data_dict.get(ck("image", ckeys.META_DICT), {}) or {}
+    source_files = [u for u in meta.get("slice_uris", []) if isinstance(u, str)]
+    _quarantine_many(source_files, paths, f"NOT PROCESSED (low-confidence text): Series {label}")
+    saved = list(data_dict.get(ck("image", ckeys.SAVED_PATHS)) or [])
+    if data_dict.get(ck("image", ckeys.SAVED_PATH)):
+        saved.append(data_dict[ck("image", ckeys.SAVED_PATH)])
+    for out_path in saved:
+        if isinstance(out_path, str) and os.path.exists(out_path):
+            os.remove(out_path)
+    summary.not_processed += len(source_files)
+    return True
+
+
 def _handle_error_result(data_dict: dict[str, Any], paths: RunnerPaths, summary: RunSummary, reason: str) -> bool:
     if "error" not in data_dict:
         return False
@@ -221,9 +250,10 @@ def _log_single_summary(summary: RunSummary) -> None:
 
 def _log_series_summary(summary: RunSummary) -> None:
     logger.info(
-        "DICOM series processing complete. Series: %d | Slices: %d | Errors: %d",
+        "DICOM series processing complete. Series: %d | Slices: %d | Not processed: %d | Errors: %d",
         summary.series,
         summary.slices,
+        summary.not_processed,
         summary.errors,
     )
 
@@ -333,6 +363,8 @@ def run_series(config_path: str) -> None:
                 report.collect(data_dict)
                 label = data_dict.get("label", "unknown")
                 if _handle_error_result(data_dict, paths, summary, f"NOT PROCESSED (ERROR): Series {label}"):
+                    continue
+                if _handle_low_confidence_series(data_dict, paths, summary, label):
                     continue
 
                 stats_dict = data_dict.get(ck("image", ckeys.REDACTION_STATS), {})

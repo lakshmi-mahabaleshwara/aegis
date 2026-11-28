@@ -45,6 +45,44 @@ logger = logging.getLogger(__name__)
 # Load Transforms (Thread-safe)
 # ---------------------------------------------------------------------------
 
+def _to_channel_first(pixel_array: np.ndarray, ds: pydicom.Dataset, uri: str) -> np.ndarray:
+    """Convert pydicom's ``pixel_array`` layout to channel-first.
+
+    pydicom returns, for ``F`` frames and ``S`` samples per pixel::
+
+        (H, W)          F == 1, S == 1   ->  (1, H, W)
+        (H, W, 3)       F == 1, S == 3   ->  (3, H, W)
+        (F, H, W)       F >  1, S == 1   ->  (1, F, H, W)
+        (F, H, W, 3)    F >  1, S == 3   ->  (3, F, H, W)
+
+    A 3-D array is ambiguous by shape alone (single-frame colour vs.
+    multi-frame monochrome), so ``SamplesPerPixel`` decides, as it does
+    inside pydicom. Multi-frame files come out as ``(C, D, H, W)`` volumes,
+    the layout :py:class:`RedactPixelPHI` treats as frames — so every frame
+    is covered by keyframe OCR and the union mask.
+
+    Raises:
+        DicomLoadError: For any other layout. Failing closed matters here:
+            a mis-shaped volume is read along the wrong axes, OCR never
+            sees a real frame, and burnt-in PHI passes through unredacted.
+    """
+    samples = int(getattr(ds, 'SamplesPerPixel', 1) or 1)
+    if pixel_array.ndim == 2:
+        return pixel_array[np.newaxis, ...]                       # (1, H, W)
+    if pixel_array.ndim == 3 and samples == 1:
+        return pixel_array[np.newaxis, ...]                       # (1, F, H, W)
+    if pixel_array.ndim == 3 and pixel_array.shape[-1] == 3:
+        return np.transpose(pixel_array, (2, 0, 1))               # (3, H, W)
+    if pixel_array.ndim == 4 and pixel_array.shape[-1] == 3:
+        return np.transpose(pixel_array, (3, 0, 1, 2))            # (3, F, H, W)
+    raise DicomLoadError(
+        f"Unsupported pixel layout {tuple(pixel_array.shape)} "
+        f"(SamplesPerPixel={samples}, NumberOfFrames={getattr(ds, 'NumberOfFrames', 1)})",
+        uri=uri,
+        transform="LoadDicomRaw",
+    )
+
+
 class LoadDicomRaw(Transform):
     """
     Array transform: Load a DICOM file without spatial transforms.
@@ -59,11 +97,13 @@ class LoadDicomRaw(Transform):
         For JPEG/PNG images, use :py:class:`LoadImage` instead.
 
     Returns:
-        MetaTensor in channel-first format ``(C, H, W)``.
+        MetaTensor in channel-first format: ``(C, H, W)`` for a single
+        frame, ``(C, D, H, W)`` for a multi-frame file (e.g. an ultrasound
+        cine loop).
 
     Raises:
         DicomLoadError: If the DICOM file is corrupted, unreadable,
-            or missing pixel data.
+            missing pixel data, or has an unsupported pixel layout.
     """
 
     backend = [TransformBackends.NUMPY]
@@ -82,10 +122,12 @@ class LoadDicomRaw(Transform):
             fs: Optional :py:class:`AegisFileSystem` for cloud-native I/O.
 
         Returns:
-            MetaTensor with shape ``(C, H, W)`` and enriched ``.meta`` dict.
+            MetaTensor with shape ``(C, H, W)`` — or ``(C, D, H, W)`` for a
+            multi-frame file — and enriched ``.meta`` dict.
 
         Raises:
-            DicomLoadError: If the file cannot be parsed.
+            DicomLoadError: If the file cannot be parsed or its pixel
+                layout is unsupported.
         """
         uri = str(uri)
 
@@ -111,10 +153,7 @@ class LoadDicomRaw(Transform):
                     transform="LoadDicomRaw",
                 ) from e
 
-            if pixel_array.ndim == 2:
-                pixel_array = pixel_array[np.newaxis, ...]  # (1, H, W)
-            elif pixel_array.ndim == 3 and pixel_array.shape[-1] == 3:
-                pixel_array = np.transpose(pixel_array, (2, 0, 1))  # (3, H, W)
+            pixel_array = _to_channel_first(pixel_array, ds, uri)
 
             meta = {
                 'filename_or_obj': uri,
@@ -163,7 +202,8 @@ class LoadDicomRawd(MapTransform):
         """Load each keyed file path into a MetaTensor.
 
         Side-effects written to the data dict per key:
-            - ``{key}`` — the loaded MetaTensor ``(C, H, W)``.
+            - ``{key}`` — the loaded MetaTensor ``(C, H, W)``, or
+              ``(C, D, H, W)`` for a multi-frame file.
             - ``{key}_meta_dict`` — live reference to ``MetaTensor.meta``.
             - ``{key}_dicom_dataset`` — cached ``pydicom.Dataset`` (DICOM only).
 

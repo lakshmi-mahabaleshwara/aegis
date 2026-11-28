@@ -254,6 +254,34 @@ class TestAgePatterns(unittest.TestCase):
                          {c: False for c in clinical})
 
 
+class TestSyntheticVendorString(unittest.TestCase):
+    """The synthetic-data vendor string is not PHI, but NER tags its all-caps
+    words as HCW. A fully anchored clinical pattern keeps exactly that text."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.config = _packaged_config()
+
+    def _ner_flags_everything(self):
+        classifier = PHIClassifier(self.config)
+        classifier._thread_local.pipeline = MagicMock(side_effect=lambda text: [
+            {'entity_group': 'HCW', 'score': 0.99, 'word': text, 'start': 0, 'end': len(text)}])
+        return classifier
+
+    def test_vendor_string_is_kept_as_ocr_reads_it(self):
+        variants = ["SYNTHETIC - DEID - TUTOR", "SYNTHETIC-DEID-TUTORIAL",
+                    "synthetic deid tutorial", "SYNTHETIC-DEID-TUTOR"]
+        classifier = self._ner_flags_everything()
+        self.assertEqual(classifier.classify_texts(variants), [False] * len(variants))
+        self.assertEqual(classifier.classify_line(["Manufacturer:", "SYNTHETIC - DEID - TUTOR"])[1], False)
+
+    def test_anchoring_does_not_protect_other_text(self):
+        classifier = self._ner_flags_everything()
+        texts = ["SYNTHETIC - DEID - TUTOR John Smith", "Dr SYNTHETIC - DEID - TUTOR",
+                 "SYNTHETIC", "DEID"]
+        self.assertEqual(classifier.classify_texts(texts), [True] * len(texts))
+
+
 class TestNerTokenizerCasing(unittest.TestCase):
     """Regression guard for the transformers 5 breakage: the pinned model is
     uncased, and transformers 5 loads its tokenizer with do_lower_case=False,

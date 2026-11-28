@@ -200,6 +200,68 @@ class PHIClassifier:
         """Check if text matches heuristic PHI patterns."""
         return any(p.search(text) for p in self.phi_heuristic_patterns)
 
+    def classify_line(self, fragments: List[str]) -> List[bool]:
+        """Classify the OCR fragments of one text line *in context*.
+
+        OCR splits a line into word groups, and a fragment judged alone
+        loses the context that makes it PHI: in "Robinson, Brandy S." the
+        surname is caught but "Brandy S." alone is not; in
+        "08/01/2021 23:16" the date is caught but "23:16" alone is not.
+
+        The fragments are joined back into their line (single spaces) and
+        PHI *spans* are located in it — age patterns, PHI heuristic
+        patterns, and PHI-labelled NER entities with their character
+        offsets. A fragment is flagged when it overlaps a span, so a name
+        on the line pulls in only the fragments it covers, not the whole
+        line. A fragment the clinical layer preserves on its own is never
+        flagged by context. On an NER error every other fragment is
+        flagged (fail closed, as in :meth:`classify_texts`).
+
+        Callers OR the result with the per-fragment flags from
+        :meth:`classify_texts`: line context only ever adds redaction.
+
+        Args:
+            fragments: The fragments of one line, left to right.
+
+        Returns:
+            One flag per fragment — True if line context marks it as PHI.
+        """
+        parts = [f.strip() for f in fragments]
+        offsets, pos = [], 0
+        for part in parts:
+            offsets.append((pos, pos + len(part)))
+            pos += len(part) + 1
+        line = " ".join(parts)
+        protected = [not part or self._is_clinical(part) for part in parts]
+        if not line.strip() or all(protected):
+            return [False] * len(parts)
+
+        spans = []
+        for pattern in self.age_patterns + self.phi_heuristic_patterns:
+            spans.extend(m.span() for m in pattern.finditer(line))
+
+        # Same short-text context wrapping as classify_texts.
+        prefix = "The report mentions " if len(line.split()) <= 3 else ""
+        try:
+            for ent in self.pipeline(f"{prefix}{line}." if prefix else line):
+                label = ent['entity_group'].replace('B-', '').replace('I-', '')
+                if label not in self.phi_labels:
+                    continue
+                start, end = ent.get('start'), ent.get('end')
+                if start is None or end is None:
+                    spans.append((0, len(line)))       # no offsets: whole line
+                else:
+                    spans.append((start - len(prefix), end - len(prefix)))
+        except Exception as e:
+            logger.error("NER line classification error for %s: %s",
+                         self._safe(line), type(e).__name__)
+            spans.append((0, len(line)))
+
+        return [
+            not prot and any(s < b and a < e for s, e in spans)
+            for (a, b), prot in zip(offsets, protected)
+        ]
+
     def classify_texts(self, texts: List[str]) -> List[bool]:
         """
         Classify a list of text strings as PHI or non-PHI.
