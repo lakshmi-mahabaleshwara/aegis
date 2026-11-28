@@ -33,12 +33,17 @@ class PHIClassifier:
     Thread-safe NER-based PHI classifier with configurable heuristic pre-filters.
 
     All classification rules are loaded from ``config['ner']``:
-      - ``phi_labels`` — NER entity types treated as PHI
+      - ``phi_labels`` — NER entity types treated as PHI (checked against the
+        loaded model's label set at startup)
+      - ``age_patterns`` — regex patterns for ages (the model has no AGE label)
       - ``clinical_allowlist`` — known terms that should never be redacted
       - ``clinical_patterns`` — regex patterns for clinical/technical text
       - ``phi_heuristic_patterns`` — regex patterns that indicate PHI
 
     Classification pipeline:
+      0. Check **age patterns** — "57Y", "Age: 57", "F 57Y" → PHI. Runs before
+         the clinical layers, whose ultrasound-frequency and probe-ID patterns
+         would otherwise claim sex+age overlays like "F 57Y" / "F57Y".
       1. Check **clinical allowlist** — known device/parameter terms → NOT PHI
       2. Check **clinical patterns** — regex for ultrasound parameters → NOT PHI
       3. Check **PHI heuristic patterns** — date-IDs, institution names → PHI
@@ -81,6 +86,9 @@ class PHIClassifier:
         self.phi_heuristic_patterns = [
             re.compile(p) for p in ner_config.get('phi_heuristic_patterns', [])
         ]
+        self.age_patterns = [
+            re.compile(p) for p in ner_config.get('age_patterns', [])
+        ]
         # OCR fragments are the burned-in PHI this pipeline exists to redact,
         # so they are never logged raw. This tokenizer renders them as the
         # same deterministic token the ground-truth report uses, keeping log
@@ -93,7 +101,16 @@ class PHIClassifier:
 
     @property
     def pipeline(self):
-        """Lazily create a per-thread NER pipeline."""
+        """Lazily create a per-thread NER pipeline.
+
+        Raises ``ValueError`` (cached, so the model is not reloaded on every
+        call) when ``phi_labels`` shares no label with the loaded model —
+        callers treat NER errors as PHI, so such a misconfiguration fails
+        closed instead of silently preserving every name.
+        """
+        label_error = getattr(self._thread_local, 'label_error', None)
+        if label_error is not None:
+            raise label_error
         if not hasattr(self._thread_local, 'pipeline'):
             if self.local_files_only:
                 # HF honours these process-wide flags across tokenizer,
@@ -115,14 +132,62 @@ class PHIClassifier:
             # forwards its own local_files_only into AutoConfig.from_pretrained,
             # so a duplicate here raises "got multiple values for keyword
             # argument 'local_files_only'" and breaks NER entirely.
-            self._thread_local.pipeline = hf_pipeline(
+            pipe = hf_pipeline(
                 'token-classification',
                 model=self.model_name,
                 revision=self.model_revision,
                 device=self.device,
                 aggregation_strategy='simple',
             )
+            try:
+                self.check_phi_labels(pipe)
+            except ValueError as exc:
+                self._thread_local.label_error = exc
+                raise
+            self._thread_local.pipeline = pipe
         return self._thread_local.pipeline
+
+    def check_phi_labels(self, pipe: Any) -> None:
+        """Compare ``phi_labels`` with the entity labels the loaded model emits.
+
+        A PHI label the model emits but the config omits is silently kept
+        visible (e.g. the Stanford model tags doctors ``HCW`` and identifiers
+        ``ID``; a config listing ``DOCTOR``/``IDNUM`` never redacts them), so
+        mismatches are surfaced here rather than discovered in the output:
+
+        - no overlap at all → ``ValueError`` (NER could never flag anything);
+        - configured labels the model never emits → warning (dead config);
+        - model labels not configured → info (deliberately non-PHI, e.g. VENDOR).
+
+        Models that expose no ``config.id2label`` mapping are not checked.
+        """
+        id2label = getattr(getattr(getattr(pipe, 'model', None), 'config', None), 'id2label', None)
+        if not isinstance(id2label, dict):
+            return
+        model_labels = {re.sub(r'^[BI]-', '', str(label)) for label in id2label.values()} - {'O'}
+        if not model_labels:
+            return
+        if not (self.phi_labels & model_labels):
+            message = (
+                f"ner.phi_labels {sorted(self.phi_labels)} shares no label with NER model "
+                f"'{self.model_name}', which emits {sorted(model_labels)} — NER could never "
+                f"flag PHI. Update ner.phi_labels to this model's labels."
+            )
+            logger.error(message)
+            raise ValueError(message)
+        unknown = sorted(self.phi_labels - model_labels)
+        if unknown:
+            logger.warning(
+                "ner.phi_labels lists labels the NER model never emits (no effect): %s. "
+                "Model labels: %s", unknown, sorted(model_labels),
+            )
+        not_phi = sorted(model_labels - self.phi_labels)
+        if not_phi:
+            logger.info("NER labels treated as non-PHI (not in ner.phi_labels): %s", not_phi)
+
+    def _is_age(self, text: str) -> bool:
+        """Check if text matches an age pattern (redacted ahead of clinical rules)."""
+        return any(p.search(text) for p in self.age_patterns)
 
     def _is_clinical(self, text: str) -> bool:
         """Check if text matches known clinical/technical terms."""
@@ -141,9 +206,10 @@ class PHIClassifier:
 
         Classification order:
           1. Empty/whitespace → NOT PHI
-          2. Clinical allowlist/patterns → NOT PHI
-          3. PHI heuristic patterns → PHI
-          4. NER model → PHI if any PHI entity detected
+          2. Age patterns → PHI (before the clinical rules — see class docs)
+          3. Clinical allowlist/patterns → NOT PHI
+          4. PHI heuristic patterns → PHI
+          5. NER model → PHI if any PHI entity detected
 
         Args:
             texts: List of OCR-detected text strings.
@@ -158,6 +224,13 @@ class PHIClassifier:
             text = text.strip()
             if not text:
                 results.append(False)
+                continue
+
+            # Layer 0: Ages → redact. Must precede the clinical layer: "F 57Y"
+            # would otherwise match the ultrasound-frequency pattern.
+            if self._is_age(text):
+                logger.debug("Age (redacted): %s", self._safe(text))
+                results.append(True)
                 continue
 
             # Layer 1: Clinical allowlist/patterns → preserve

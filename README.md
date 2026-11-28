@@ -232,13 +232,16 @@ ner:
                                   # pinned so the model cannot silently change under a deployment
   local_files_only: '${AEGIS_HF_OFFLINE:false}'  # true → resolve from local HF cache, zero network calls
   device: '${AEGIS_DEVICE:cpu}'   # 'cpu', 'cuda', or 'mps'
-  phi_labels:                     # NER entity types treated as PHI
-    - PATIENT
-    - DOCTOR
-    - HOSPITAL
+  phi_labels:                     # NER entity types treated as PHI — must be labels
+    - PATIENT                     # the model emits (checked at startup). The pinned
+    - HCW                         # model emits PATIENT, HCW (doctors/staff), HOSPITAL,
+    - HOSPITAL                    # ID, DATE, PHONE and VENDOR (not PHI).
+    - ID
     - DATE
-    - IDNUM
-    # ... (22 labels total)
+    - PHONE
+  age_patterns:                   # Regex for ages — redacted, checked FIRST
+    - '(?i)\bage\s*[:=]?\s*\d{1,3}(?!\d)'   # Age 57, AGE: 57Y
+    # ... (57Y, 57 y/o, F 57Y, 006M, M/57)
   clinical_allowlist:             # Terms never redacted
     - mindray
     - ge
@@ -331,10 +334,11 @@ flags, so containers run air-gapped by default.
 
 ### NER Classification Pipeline
 
-When `ner.enabled: true`, each OCR-detected text goes through a 3-layer pipeline:
+When `ner.enabled: true`, each OCR-detected text goes through a layered pipeline:
 
 | Layer | Source | Action | Example |
 |-------|--------|--------|---------|
+| 0. Age patterns | `ner.age_patterns` | **Redact** | `Age 57Y`, `F 57Y`, `57 y/o`, `006M` |
 | 1. Clinical allowlist | `ner.clinical_allowlist` | **Preserve** | `mindray`, `adult abd n` |
 | 2. Clinical patterns | `ner.clinical_patterns` | **Preserve** | `FH5.0`, `D 13.0`, `SC5-1N` |
 | 3. PHI heuristics | `ner.phi_heuristic_patterns` | **Redact** | `20260117-091825-6AAA` |
@@ -384,6 +388,13 @@ staging_output/dicom/<timestamp>/
 (Image runs write to `staging_output/image/<timestamp>/`. PNG/JPEG inputs have
 no DICOM header, so image runs emit only `aegis_pixel_detections.csv` —
 `aegis_tag_actions.csv` is not created, and SOP UID columns are blank.)
+
+Reports are written **as the run progresses**: each file's (or series') rows
+are appended and flushed to disk as soon as it finishes. If a run crashes or
+is killed part-way (out-of-memory, Ctrl-C, container stop), the CSVs still
+hold the rows of every file completed before the interruption, and an
+interrupted run logs `Run interrupted (...)`. Files are created when the first
+file finishes; an empty run produces header-only CSVs.
 
 ### `aegis_pixel_detections.csv` — one row per OCR region
 | Column | Meaning |

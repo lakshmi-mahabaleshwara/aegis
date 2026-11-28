@@ -88,30 +88,36 @@ ner:
   local_files_only: '${AEGIS_HF_OFFLINE:false}'
   device: '${AEGIS_DEVICE:cpu}'  # options: 'cpu', 'cuda', 'mps'
 
-  # NER entity types treated as PHI (text matching these → redacted)
+  # NER entity types treated as PHI (text matching these → redacted).
+  # These must be labels the model above actually emits: a PHI label missing
+  # here is silently kept visible, and a label the model never produces does
+  # nothing. The pinned Stanford de-identifier emits PATIENT, HCW (health-care
+  # worker: doctors, technologists), HOSPITAL, ID, DATE, PHONE and VENDOR.
+  # VENDOR (device/software vendors) is deliberately not treated as PHI.
+  # The model has no AGE label — ages are caught by age_patterns below.
+  # The classifier checks this list against the loaded model at startup.
+  # If you change model_name, update this list to that model's labels.
   phi_labels:
     - PATIENT
-    - DOCTOR
-    - USERNAME
-    - IDNUM
-    - MEDICALRECORD
+    - HCW
     - HOSPITAL
+    - ID
     - DATE
-    - AGE
     - PHONE
-    - FAX
-    - EMAIL
-    - URL
-    - SSN
-    - ACCOUNT
-    - LICENSE
-    - STREET
-    - CITY
-    - STATE
-    - ZIP
-    - COUNTRY
-    - ORGANIZATION
-    - PROFESSION
+
+  # Ages in burnt-in text (redacted). Checked FIRST — before the clinical
+  # allowlist/patterns — because sex+age overlays such as "F 57Y" or "F57Y"
+  # otherwise match the ultrasound-frequency and probe-ID clinical patterns
+  # and would be preserved. The NER model has no AGE label, so without these
+  # patterns ages are never redacted. Patterns are searched (not anchored)
+  # unless they carry their own ^/$ anchors.
+  age_patterns:
+    - '(?i)\bage\s*[:=]?\s*\d{1,3}(?!\d)'                                     # Age 57, AGE: 57Y, Pt age 57
+    - '(?i)(?<![\d.])\d{1,3}\s*(?:y|yr|yrs|yo|y/o|y\.o\.?|years?(?:\s*old)?)(?![a-z])'  # 57Y, 57 yrs, 57 y/o, F 57Y
+    - '(?i)(?<![\d.])\d{1,3}\s*(?:mo|mos|months?|wks?|weeks?|days?)\s+old\b'  # 6 months old, 3 days old
+    - '(?i)^\d{3}[DWM]$'                                                      # DICOM AS format: 006M, 003W, 010D
+    - '(?i)^[MF]\s*[/,]\s*\d{1,3}$'                                           # M/57, F,57
+    - '(?i)^\d{1,3}\s*[/,]\s*[MF]$'                                           # 57/F, 57,M
 
   # Known clinical/technical terms that should NEVER be redacted
   clinical_allowlist:

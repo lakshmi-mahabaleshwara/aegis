@@ -7,6 +7,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Manifests and skill wrappers pin against these releases, so behavior changes
 that affect output are called out explicitly under **Changed**.
 
+## [Unreleased]
+
+### Fixed
+- **Burnt-in names were not redacted under transformers 5.** transformers 5
+  loads the pinned Stanford NER model's (uncased) tokenizer with
+  `do_lower_case=False`, so every capitalized word became `[UNK]` and the
+  model stopped detecting patient names, doctors and hospitals; only dates
+  and the regex heuristics still fired. transformers is now held to
+  `>=4.57.0,<4.58` (pyproject, requirements.txt, Docker constraints), and a
+  regression test checks the tokenizer keeps capitalized names.
+- **NER label mismatch.** `ner.phi_labels` listed labels the model never
+  emits (`DOCTOR`, `IDNUM`, …) while omitting ones it does (`HCW` for
+  doctors/staff, `ID` for identifiers), so NER-detected doctors and IDs were
+  kept. The list now matches the model (`PATIENT`, `HCW`, `HOSPITAL`, `ID`,
+  `DATE`, `PHONE`; `VENDOR` deliberately excluded), and the classifier checks
+  it against the loaded model at startup — warning on dead labels and failing
+  closed (treating text as PHI) when nothing overlaps.
+- **Ground-truth reports are crash-safe.** Report rows now stream to disk per
+  file instead of being written once at the end, so an interrupted run keeps
+  the rows of every completed file. Applies to the DICOM and image runners,
+  `api.deidentify`, and MCP batch jobs.
+
+### Changed
+- **Ages in burnt-in text are now redacted** via new `ner.age_patterns`
+  (`Age 57Y`, `57 y/o`, `F 57Y`, DICOM `006M`, `M/57`, …). The model has no
+  AGE label, so ages were previously always kept. Age patterns run before the
+  clinical rules, which would otherwise preserve sex+age overlays such as
+  `F 57Y` as an ultrasound frequency setting.
+- Pixel redaction output changes as a result of the three items above: more
+  regions (names, doctors, hospitals, IDs, ages) are redacted.
+
 ## [0.2.0] - 2026-07-24
 
 ### Added

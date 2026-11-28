@@ -238,7 +238,6 @@ def run_single(config_path: str) -> None:
     )
 
     summary = RunSummary()
-    report = reporting.GroundTruthAccumulator(config)
 
     slices = discover_dicoms(paths.pipeline_input_dir, fs=fs)
     data_list = [{"image": s.uri} for s in slices]
@@ -247,13 +246,14 @@ def run_single(config_path: str) -> None:
         logger.warning("No DICOM files found in %s", paths.input_dir)
         return
 
-    for data_dict in _run_dataloader(data_list, pipeline, num_workers=0):
-        report.collect(data_dict)
-        if _handle_error_result(data_dict, paths, summary, "NOT PROCESSED (ERROR)"):
-            continue
-        _handle_single_result(data_dict, paths, summary, count_as_processed="processed")
+    # Reports stream to disk per file, so a crash keeps every completed row.
+    with reporting.GroundTruthAccumulator(config, output_dir=paths.output_dir) as report:
+        for data_dict in _run_dataloader(data_list, pipeline, num_workers=0):
+            report.collect(data_dict)
+            if _handle_error_result(data_dict, paths, summary, "NOT PROCESSED (ERROR)"):
+                continue
+            _handle_single_result(data_dict, paths, summary, count_as_processed="processed")
 
-    report.flush(paths.output_dir)
     _log_single_summary(summary)
 
 
@@ -310,48 +310,48 @@ def run_series(config_path: str) -> None:
                 )
 
     summary = RunSummary()
-    report = reporting.GroundTruthAccumulator(config)
 
-    if singletons_data:
-        for data_dict in _run_dataloader(
-            singletons_data,
-            pipeline_single,
-            num_workers=paths.dataloader_num_workers,
-        ):
-            report.collect(data_dict)
-            if _handle_error_result(data_dict, paths, summary, "NOT PROCESSED (ERROR)"):
-                continue
-            _handle_single_result(data_dict, paths, summary, count_as_processed="slices")
+    # Reports stream to disk per file/series, so a crash keeps every completed row.
+    with reporting.GroundTruthAccumulator(config, output_dir=paths.output_dir) as report:
+        if singletons_data:
+            for data_dict in _run_dataloader(
+                singletons_data,
+                pipeline_single,
+                num_workers=paths.dataloader_num_workers,
+            ):
+                report.collect(data_dict)
+                if _handle_error_result(data_dict, paths, summary, "NOT PROCESSED (ERROR)"):
+                    continue
+                _handle_single_result(data_dict, paths, summary, count_as_processed="slices")
 
-    if series_data:
-        for data_dict in _run_dataloader(
-            series_data,
-            pipeline,
-            num_workers=paths.dataloader_num_workers,
-        ):
-            report.collect(data_dict)
-            label = data_dict.get("label", "unknown")
-            if _handle_error_result(data_dict, paths, summary, f"NOT PROCESSED (ERROR): Series {label}"):
-                continue
+        if series_data:
+            for data_dict in _run_dataloader(
+                series_data,
+                pipeline,
+                num_workers=paths.dataloader_num_workers,
+            ):
+                report.collect(data_dict)
+                label = data_dict.get("label", "unknown")
+                if _handle_error_result(data_dict, paths, summary, f"NOT PROCESSED (ERROR): Series {label}"):
+                    continue
 
-            stats_dict = data_dict.get(ck("image", ckeys.REDACTION_STATS), {})
-            strategy = stats_dict.get("volume_strategy", "unknown")
-            target_token = data_dict.get(ck("image", ckeys.TARGET_TOKEN))
-            out_msg = f"Token: {target_token}" if target_token else "Original structure"
-            num_slices = data_dict.get("num_slices", 0)
+                stats_dict = data_dict.get(ck("image", ckeys.REDACTION_STATS), {})
+                strategy = stats_dict.get("volume_strategy", "unknown")
+                target_token = data_dict.get(ck("image", ckeys.TARGET_TOKEN))
+                out_msg = f"Token: {target_token}" if target_token else "Original structure"
+                num_slices = data_dict.get("num_slices", 0)
 
-            logger.info(
-                "Series %s complete: strategy=%s, redacted=%d | Output: %s",
-                label,
-                strategy,
-                stats_dict.get("redacted_count", 0),
-                out_msg,
-            )
+                logger.info(
+                    "Series %s complete: strategy=%s, redacted=%d | Output: %s",
+                    label,
+                    strategy,
+                    stats_dict.get("redacted_count", 0),
+                    out_msg,
+                )
 
-            summary.series += 1
-            summary.slices += num_slices
+                summary.series += 1
+                summary.slices += num_slices
 
-    report.flush(paths.output_dir)
     _log_series_summary(summary)
 
 

@@ -281,12 +281,7 @@ def write_phi_report(
             "is not set — verbatim OCR text is raw PHI and must be written "
             "outside the de-identified output directory."
         )
-    if os.path.realpath(phi_report_dir) == os.path.realpath(output_dir):
-        raise ValueError(
-            "reporting.phi_report_dir must differ from the run output "
-            "directory — the PHI-bearing report must never sit next to the "
-            "de-identified output."
-        )
+    _check_phi_report_dir(phi_report_dir, output_dir)
     os.makedirs(phi_report_dir, exist_ok=True)
     path = os.path.join(phi_report_dir, PIXEL_DETECTIONS_PHI_FILE)
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -300,13 +295,59 @@ def write_phi_report(
     return path
 
 
+def _check_phi_report_dir(phi_report_dir: str, output_dir: str) -> None:
+    """Enforce that the PHI-bearing report lives outside the output tree."""
+    if os.path.realpath(phi_report_dir) == os.path.realpath(output_dir):
+        raise ValueError(
+            "reporting.phi_report_dir must differ from the run output "
+            "directory — the PHI-bearing report must never sit next to the "
+            "de-identified output."
+        )
+
+
+class _CsvStream:
+    """One CSV report file, opened once and appended to as files complete.
+
+    Every :meth:`write` flushes to the OS, so rows for completed files are
+    on disk even if the process is later killed (OOM killer, SIGKILL,
+    Ctrl-C). A power loss can still drop the last few writes, since rows are
+    not fsync'ed.
+    """
+
+    def __init__(self, path: str, fields: List[str], extrasaction: str = "raise") -> None:
+        self.path = path
+        self.rows = 0
+        self._file = open(path, "w", newline="", encoding="utf-8")
+        self._writer = csv.DictWriter(self._file, fieldnames=fields, extrasaction=extrasaction)
+        self._writer.writeheader()
+        self._file.flush()
+
+    def write(self, rows: List[Dict[str, Any]]) -> None:
+        if rows:
+            self._writer.writerows(rows)
+            self.rows += len(rows)
+        self._file.flush()
+
+    def close(self) -> None:
+        if not self._file.closed:
+            self._file.close()
+
+
 class GroundTruthAccumulator:
     """Collect per-file redaction records across a run and write CSV reports.
 
     A no-op when ``reporting.save_ground_truth`` is false — in that case the
     caller is expected to read records from each result dict directly (e.g.
     via :func:`extract_records`) and persist them elsewhere. Shared by the
-    DICOM and image runners.
+    DICOM and image runners, the API, and the MCP batch job.
+
+    **Crash-safe streaming.** Pass ``output_dir`` at construction and each
+    :meth:`collect` appends that file's rows to the CSVs and flushes them to
+    disk immediately, so a run that crashes or is killed part-way keeps the
+    report rows of every file it finished. Use it as a context manager (or
+    call :meth:`flush` in a ``finally``) so files are closed — and an
+    interrupted run is logged as such — on any exit. Without ``output_dir``
+    rows are held in memory until :meth:`flush` (legacy behavior).
 
     The pixel CSV written to the output directory is PHI-free (tokenized
     text — see :func:`sanitize_pixel_rows`). When
@@ -314,16 +355,27 @@ class GroundTruthAccumulator:
     is additionally written to ``reporting.phi_report_dir`` — required to be
     set (checked here, at construction, so a misconfigured run fails before
     processing any file) and to differ from the output directory (checked
-    at :meth:`flush`, when the output directory is known).
+    as soon as the output directory is known).
+
+    Report files are created on the first :meth:`collect` (or at
+    :meth:`flush`, header-only, if nothing was collected), so a run that
+    exits before processing anything leaves no report behind.
 
     Args:
         config: Loaded pipeline configuration.
         include_tag_actions: Set False for runs where header-tag scrubbing
             is not applicable (JPEG/PNG images have no DICOM tags) — the
             tag-actions CSV is then not written at all.
+        output_dir: Run output directory. When given, rows stream to disk
+            per file (see above).
     """
 
-    def __init__(self, config: Dict[str, Any], include_tag_actions: bool = True) -> None:
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        include_tag_actions: bool = True,
+        output_dir: Optional[str] = None,
+    ) -> None:
         self.enabled = is_enabled(config)
         self.include_tag_actions = include_tag_actions
         reporting_cfg = config.get("reporting", {}) or {}
@@ -338,28 +390,103 @@ class GroundTruthAccumulator:
                 "raw PHI and must be written outside the de-identified "
                 "output directory."
             )
+        self.output_dir = output_dir
+        if self.enabled and self.include_phi_text and output_dir:
+            _check_phi_report_dir(self.phi_report_dir, output_dir)
         self._tokenizer = AegisIdentityManager.from_config(config) if self.enabled else None
+        # Rows not yet written (only accumulates while output_dir is unknown).
         self.pixel_rows: List[Dict[str, Any]] = []
         self.tag_rows: List[Dict[str, Any]] = []
+        self._streams: Optional[Dict[str, _CsvStream]] = None
+        self._closed = False
+
+    def __enter__(self) -> "GroundTruthAccumulator":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        if exc_type is not None and self.enabled and self._streams is not None:
+            logger.warning(
+                "Run interrupted (%s): ground-truth reports keep the rows of "
+                "every file completed before the interruption.",
+                exc_type.__name__,
+            )
+        self.flush()
+        return False  # never swallow the exception
+
+    def _open(self) -> Dict[str, _CsvStream]:
+        if self._streams is None:
+            assert self.output_dir is not None
+            if self.include_phi_text:
+                _check_phi_report_dir(self.phi_report_dir, self.output_dir)
+            os.makedirs(self.output_dir, exist_ok=True)
+            streams = {
+                "pixel": _CsvStream(os.path.join(self.output_dir, PIXEL_DETECTIONS_FILE), PIXEL_FIELDS),
+            }
+            if self.include_tag_actions:
+                streams["tag"] = _CsvStream(os.path.join(self.output_dir, TAG_ACTIONS_FILE), TAG_FIELDS)
+            if self.include_phi_text:
+                os.makedirs(self.phi_report_dir, exist_ok=True)
+                streams["phi"] = _CsvStream(
+                    os.path.join(self.phi_report_dir, PIXEL_DETECTIONS_PHI_FILE),
+                    PIXEL_PHI_FIELDS,
+                    extrasaction="ignore",
+                )
+            self._streams = streams
+        return self._streams
+
+    def _write_pending(self) -> None:
+        streams = self._open()
+        streams["pixel"].write(sanitize_pixel_rows(self.pixel_rows, self._tokenizer))
+        if "phi" in streams:
+            streams["phi"].write(self.pixel_rows)
+        if "tag" in streams:
+            streams["tag"].write(self.tag_rows)
+        self.pixel_rows = []
+        self.tag_rows = []
 
     def collect(self, data_dict: Dict[Any, Any], key: str = "image") -> None:
         if not self.enabled:
             return
+        if self._closed:
+            raise RuntimeError("GroundTruthAccumulator.collect() called after flush()")
         pixel_rows, tag_rows = extract_records(data_dict, key)
         self.pixel_rows.extend(pixel_rows)
         if self.include_tag_actions:
             self.tag_rows.extend(tag_rows)
+        if self.output_dir is not None:
+            self._write_pending()
 
-    def flush(self, output_dir: str) -> None:
-        if not self.enabled:
+    def flush(self, output_dir: Optional[str] = None) -> None:
+        """Write any pending rows, close the report files, and log them.
+
+        ``output_dir`` is required only when it was not given at
+        construction; passing a different directory than the one already
+        streaming to is an error. Safe to call more than once.
+        """
+        if not self.enabled or self._closed:
             return
-        write_reports(
-            sanitize_pixel_rows(self.pixel_rows, self._tokenizer),
-            self.tag_rows if self.include_tag_actions else None,
-            output_dir,
-        )
-        if self.include_phi_text:
-            write_phi_report(self.pixel_rows, self.phi_report_dir, output_dir)
+        if output_dir is not None:
+            if self.output_dir is not None and os.path.realpath(output_dir) != os.path.realpath(self.output_dir):
+                raise ValueError(
+                    f"flush() output_dir {output_dir!r} differs from the directory "
+                    f"reports are streaming to ({self.output_dir!r})."
+                )
+            self.output_dir = output_dir
+        if self.output_dir is None:
+            raise ValueError("GroundTruthAccumulator.flush() needs an output_dir.")
+        self._closed = True
+        try:
+            self._write_pending()  # also creates header-only files on an empty run
+        finally:
+            for name, stream in (self._streams or {}).items():
+                stream.close()
+                if name == "phi":
+                    logger.warning(
+                        "Wrote PHI-bearing report (verbatim OCR text): %s (%d rows) — "
+                        "handle this file as PHI.", stream.path, stream.rows,
+                    )
+                else:
+                    logger.info("Wrote ground-truth report: %s (%d rows)", stream.path, stream.rows)
 
 
 __all__ = [

@@ -279,3 +279,117 @@ def test_accumulator_image_mode_omits_tag_actions(tmp_path):
 
     assert os.path.exists(os.path.join(str(tmp_path), reporting.PIXEL_DETECTIONS_FILE))
     assert not os.path.exists(os.path.join(str(tmp_path), reporting.TAG_ACTIONS_FILE))
+
+
+# ---------------------------------------------------------------------------
+# Crash-safe streaming (output_dir given at construction)
+# ---------------------------------------------------------------------------
+
+def _det_data(path, text):
+    return {
+        "image_meta_dict": {"filename_or_obj": path},
+        "image_redaction_stats": {
+            "detections": [
+                {"bbox": [5, 5, 183, 15], "ocr_text": text,
+                 "confidence": 0.97, "decision": "redacted"},
+            ],
+        },
+    }
+
+
+def _read_rows(path):
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def test_streaming_rows_are_on_disk_before_flush(tmp_path):
+    """A run killed mid-way (no flush, no close) keeps every completed file."""
+    report = reporting.GroundTruthAccumulator(_phi_config(), output_dir=str(tmp_path))
+    report.collect(_det_data("/in/a.dcm", "Robinson, Brandy S."))
+    report.collect(_det_data("/in/b.dcm", "Okafor, Chidi"))
+
+    # Simulate a hard kill: read the files without flush()/close().
+    pixel = _read_rows(os.path.join(str(tmp_path), reporting.PIXEL_DETECTIONS_FILE))
+    assert [r["source_path"] for r in pixel] == ["/in/a.dcm", "/in/b.dcm"]
+    assert all(r["text_token"].startswith("TOKEN_") for r in pixel)
+    assert os.path.exists(os.path.join(str(tmp_path), reporting.TAG_ACTIONS_FILE))
+    assert report.pixel_rows == [] and report.tag_rows == []  # nothing held in memory
+    report.flush()
+
+
+def test_streaming_context_manager_keeps_rows_when_run_crashes(tmp_path, caplog):
+    import logging
+    import pytest
+    caplog.set_level(logging.WARNING, logger="monai_aegis.reporting")
+    with pytest.raises(RuntimeError, match="boom"):
+        with reporting.GroundTruthAccumulator(_phi_config(), output_dir=str(tmp_path)) as report:
+            report.collect(_det_data("/in/a.dcm", "Robinson, Brandy S."))
+            raise RuntimeError("boom")  # crash before the second file
+
+    pixel = _read_rows(os.path.join(str(tmp_path), reporting.PIXEL_DETECTIONS_FILE))
+    assert [r["source_path"] for r in pixel] == ["/in/a.dcm"]
+    assert "Run interrupted (RuntimeError)" in caplog.text
+
+
+def test_streaming_empty_run_writes_header_only_on_flush(tmp_path):
+    with reporting.GroundTruthAccumulator(_phi_config(), output_dir=str(tmp_path)):
+        pass
+    pixel_file = os.path.join(str(tmp_path), reporting.PIXEL_DETECTIONS_FILE)
+    assert _read_rows(pixel_file) == []
+    with open(pixel_file) as f:
+        assert f.readline().startswith("source_path,")
+
+
+def test_streaming_creates_no_files_until_first_collect(tmp_path):
+    out_dir = tmp_path / "out"
+    reporting.GroundTruthAccumulator(_phi_config(), output_dir=str(out_dir))
+    assert not out_dir.exists()
+
+
+def test_streaming_phi_report_is_streamed_too(tmp_path):
+    out_dir, phi_dir = tmp_path / "out", tmp_path / "phi"
+    report = reporting.GroundTruthAccumulator(
+        _phi_config(include_phi_text=True, phi_report_dir=str(phi_dir)),
+        output_dir=str(out_dir),
+    )
+    report.collect(_det_data("/in/a.dcm", "Robinson, Brandy S."))
+
+    rows = _read_rows(os.path.join(str(phi_dir), reporting.PIXEL_DETECTIONS_PHI_FILE))
+    assert rows[0]["ocr_text"] == "Robinson, Brandy S."
+    with open(os.path.join(str(out_dir), reporting.PIXEL_DETECTIONS_FILE)) as f:
+        assert "Robinson" not in f.read()
+    report.flush()
+
+
+def test_streaming_phi_dir_checked_at_construction(tmp_path):
+    import pytest
+    with pytest.raises(ValueError, match="must differ"):
+        reporting.GroundTruthAccumulator(
+            _phi_config(include_phi_text=True, phi_report_dir=str(tmp_path)),
+            output_dir=str(tmp_path),
+        )
+
+
+def test_flush_rejects_a_different_output_dir(tmp_path):
+    import pytest
+    report = reporting.GroundTruthAccumulator(_phi_config(), output_dir=str(tmp_path / "a"))
+    report.collect(_det_data("/in/a.dcm", "x"))
+    with pytest.raises(ValueError, match="differs"):
+        report.flush(str(tmp_path / "b"))
+
+
+def test_collect_after_flush_is_an_error(tmp_path):
+    import pytest
+    report = reporting.GroundTruthAccumulator(_phi_config(), output_dir=str(tmp_path))
+    report.flush()
+    report.flush()  # idempotent
+    with pytest.raises(RuntimeError, match="after flush"):
+        report.collect(_det_data("/in/a.dcm", "x"))
+
+
+def test_streaming_disabled_reporting_writes_nothing(tmp_path):
+    with reporting.GroundTruthAccumulator(
+        {"reporting": {"save_ground_truth": False}}, output_dir=str(tmp_path / "out")
+    ) as report:
+        report.collect(_det_data("/in/a.dcm", "x"))
+    assert not (tmp_path / "out").exists()
