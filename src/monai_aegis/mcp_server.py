@@ -162,7 +162,7 @@ _ground_truth_lock = threading.Lock()
 def _merge_ground_truth(result: Dict[Any, Any], out_dir: str) -> None:
     """Merge one file's ground-truth rows into *out_dir*'s CSV reports.
 
-    The batch path flushes a GroundTruthAccumulator once into a fresh per-job
+    The batch path streams a GroundTruthAccumulator into a fresh per-job
     directory, so plain overwrite is correct there. Single-file calls share an
     output directory across calls, so their rows are merged instead: existing
     rows for the same source file are replaced (a re-run refreshes that
@@ -351,8 +351,10 @@ def _run_batch_job(job: Dict[str, Any]) -> None:
         # writes a tag-actions CSV (JPEG/PNG have no DICOM tags), the DICOM
         # runner always does.
         has_dicom = any(kind == "dicom" for _path, kind in files)
+        # output_dir → report rows stream to disk per file, so a job that
+        # dies part-way still leaves the rows of every file it finished.
         accumulator = reporting.GroundTruthAccumulator(
-            _get_config(), include_tag_actions=has_dicom
+            _get_config(), include_tag_actions=has_dicom, output_dir=job["output_dir"]
         )
         per_file: Dict[str, Dict[str, Any]] = {}
 

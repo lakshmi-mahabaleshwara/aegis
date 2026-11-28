@@ -28,7 +28,7 @@ from monai_aegis.transforms import context_keys as ckeys
 from monai_aegis.transforms.context_keys import ck
 
 __all__ = [
-    "detect_text", "apply_redaction",
+    "detect_text", "apply_redaction", "group_text_lines", "pad_redaction_boxes",
     "select_keyframe_indices", "build_union_mask", "redact_volume_safe",
     "RedactPixelPHI", "RedactPixelPHId",
 ]
@@ -52,6 +52,214 @@ def _bbox_to_xywh(bbox: Any) -> List[int]:
     x0, y0 = min(xs), min(ys)
     return [int(round(x0)), int(round(y0)),
             int(round(max(xs) - x0)), int(round(max(ys) - y0))]
+
+
+def group_text_lines(
+    bboxes: List[Any],
+    gap_ratio: float = 1.5,
+    min_vertical_overlap: float = 0.5,
+) -> List[List[int]]:
+    """Group OCR detections into text lines.
+
+    Two detections are on the same line when they overlap vertically by at
+    least ``min_vertical_overlap`` of the shorter box's height and the
+    horizontal gap between them is at most ``gap_ratio`` times the taller
+    box's height. Lines are the connected groups of that relation, so text
+    in separate columns (e.g. patient block on the left, scanner settings
+    on the right) stays in separate lines.
+
+    Args:
+        bboxes: EasyOCR 4-corner boxes.
+        gap_ratio: Maximum horizontal gap, in text heights.
+        min_vertical_overlap: Minimum vertical overlap, as a fraction of the
+            shorter box's height.
+
+    Returns:
+        Lists of detection indices, each ordered left to right.
+    """
+    rects = []
+    for bbox in bboxes:
+        x, y, w, h = _bbox_to_xywh(bbox)
+        rects.append((x, y, x + w, y + h, max(h, 1)))
+    parent = list(range(len(rects)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i, (ax0, ay0, ax1, ay1, ah) in enumerate(rects):
+        for j in range(i + 1, len(rects)):
+            bx0, by0, bx1, by1, bh = rects[j]
+            overlap = min(ay1, by1) - max(ay0, by0)
+            gap = max(bx0 - ax1, ax0 - bx1)
+            if overlap >= min_vertical_overlap * min(ah, bh) and gap <= gap_ratio * max(ah, bh):
+                parent[find(i)] = find(j)
+
+    lines: Dict[int, List[int]] = {}
+    for i in range(len(rects)):
+        lines.setdefault(find(i), []).append(i)
+    return [sorted(members, key=lambda k: rects[k][0]) for members in lines.values()]
+
+
+def _apply_line_context(
+    results: List[Tuple[Any, str, float]],
+    phi_flags: List[bool],
+    ner_classifier: Any,
+    config: Dict[str, Any],
+) -> List[bool]:
+    """OR per-fragment PHI flags with flags from whole-line classification.
+
+    See :meth:`PHIClassifier.classify_line`. Only lines with two or more
+    fragments, at least one of them not yet flagged, are re-classified.
+    Controlled by ``ner.line_context`` (default on) and
+    ``ner.line_gap_ratio``.
+    """
+    from monai_aegis.config.config_loader import as_bool
+    ner_cfg = config.get('ner', {}) or {}
+    if not as_bool(ner_cfg.get('line_context'), default=True):
+        return phi_flags
+    gap_ratio = float(ner_cfg.get('line_gap_ratio', 1.5))
+    flags = list(phi_flags)
+    for line in group_text_lines([bbox for bbox, _, _ in results], gap_ratio=gap_ratio):
+        if len(line) < 2 or all(flags[i] for i in line):
+            continue
+        line_flags = ner_classifier.classify_line([results[i][1] for i in line])
+        for i, flagged in zip(line, line_flags):
+            if flagged is True:
+                flags[i] = True
+    return flags
+
+
+# Redaction padding: a column beside a redacted box counts as more text when at
+# least INK_MIN_PIXELS of its pixels are within INK_TOLERANCE (per channel) of
+# the box's text colour and at most MAX_FOREIGN_FRACTION are neither text nor
+# background colour. A mostly-foreign column is image content (e.g. speckle in
+# an ultrasound fan, which can hit the text colour) and ends the extension.
+# Boxes whose text barely differs from the background (MIN_TEXT_CONTRAST) are
+# not extended.
+INK_TOLERANCE = 48
+INK_MIN_PIXELS = 2
+MAX_FOREIGN_FRACTION = 0.5
+MIN_TEXT_CONTRAST = 60
+INK_GAP_RATIO = 0.8      # stop after a run of blank columns wider than this x height
+INK_MARGIN = 2           # px kept around the last ink column (anti-aliasing)
+
+
+def _text_colour(region: np.ndarray) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """``(text colour, background colour)`` inside a box, or None if it has no clear text.
+
+    The background is the median of the box border; the text colour is the
+    mean of the 10% of pixels furthest from it.
+    """
+    px = region.reshape(-1, region.shape[-1] if region.ndim == 3 else 1).astype(np.float32)
+    border = np.concatenate([region[0], region[-1], region[:, 0], region[:, -1]])
+    background = np.median(border.reshape(-1, px.shape[1]).astype(np.float32), axis=0)
+    distance = np.abs(px - background).max(axis=1)
+    if distance.max() < MIN_TEXT_CONTRAST:
+        return None
+    return px[distance >= np.percentile(distance, 90)].mean(axis=0), background
+
+
+def _ink_extent(
+    image: np.ndarray, y0: int, y1: int, columns: range,
+    colours: Tuple[np.ndarray, np.ndarray], max_gap: int,
+) -> Optional[int]:
+    """Walk *columns* outward from a box edge; return the last column holding text ink.
+
+    Stops at the first run of more than *max_gap* columns without ink, and
+    at the first column that is mostly neither text nor background colour.
+    """
+    text, background = colours
+    last, blank = None, 0
+    for c in columns:
+        col = image[y0:y1, c].reshape(y1 - y0, -1).astype(np.float32)
+        is_text = np.abs(col - text).max(axis=1) <= INK_TOLERANCE
+        is_background = np.abs(col - background).max(axis=1) <= INK_TOLERANCE
+        if (~is_text & ~is_background).sum() > MAX_FOREIGN_FRACTION * (y1 - y0):
+            break
+        if is_text.sum() >= INK_MIN_PIXELS:
+            last, blank = c, 0
+        else:
+            blank += 1
+            if blank > max_gap:
+                break
+    return last
+
+
+def pad_redaction_boxes(
+    redact_bboxes: List[Any],
+    keep_bboxes: List[Any],
+    padding_ratio: float,
+    image: Optional[np.ndarray] = None,
+    min_vertical_overlap: float = 0.5,
+) -> List[List[List[int]]]:
+    """Widen redaction boxes sideways to cover text OCR did not detect.
+
+    OCR's text detector drops very short tokens next to longer ones — a
+    middle initial ("S."), a suffix ("Jr."), a lone digit — so they are
+    never classified and stay visible beside a redacted name.
+
+    Each box may grow left and right by up to ``padding_ratio`` times its
+    height, never into a kept (not redacted) detection on the same line.
+    With *image*, a box grows only across adjacent columns holding pixels
+    of the box's own text colour, stopping at the first gap wider than a
+    word space — so plain background and image content beside the text
+    (e.g. an ultrasound fan) are left alone. Without *image* the full
+    allowance is used.
+
+    Args:
+        redact_bboxes: EasyOCR 4-corner boxes to redact.
+        keep_bboxes: EasyOCR 4-corner boxes that must stay visible.
+        padding_ratio: Maximum growth per side, in box heights. ``0`` returns
+            the boxes unchanged.
+        image: The image OCR read, ``(H, W)`` or ``(H, W, C)``.
+        min_vertical_overlap: Vertical overlap (fraction of the shorter box)
+            for a kept box to count as being on the same line.
+
+    Returns:
+        Axis-aligned EasyOCR 4-corner boxes (right/bottom edges exclusive,
+        as :func:`apply_redaction` slices them).
+    """
+    if padding_ratio <= 0:
+        return list(redact_bboxes)
+    keeps = []
+    for bbox in keep_bboxes:
+        x, y, w, h = _bbox_to_xywh(bbox)
+        keeps.append((x, y, x + w, y + h))
+    width = image.shape[1] if image is not None else None
+    padded = []
+    for bbox in redact_bboxes:
+        x, y, w, h = _bbox_to_xywh(bbox)
+        x0, y0, x1, y1 = x, y, x + w, y + h
+        pad = int(round(padding_ratio * max(h, 1)))
+        left, right = x0 - pad, x1 + pad              # left inclusive, right exclusive
+        for kx0, ky0, kx1, ky1 in keeps:
+            if min(y1, ky1) - max(y0, ky0) < min_vertical_overlap * max(1, min(h, ky1 - ky0)):
+                continue
+            if kx0 >= x1:
+                right = min(right, kx0)
+            elif kx1 <= x0:
+                left = max(left, kx1)
+        left, right = max(left, 0), right if width is None else min(right, width)
+
+        if image is not None:
+            ry0, ry1 = max(y0, 0), min(y1, image.shape[0])
+            region = image[ry0:ry1, max(x0, 0):min(x1, width)]
+            colours = _text_colour(region) if region.size and min(region.shape[:2]) >= 2 else None
+            if colours is None:
+                left, right = x0, x1
+            else:
+                gap = max(2, int(round(INK_GAP_RATIO * max(h, 1))))
+                last_r = _ink_extent(image, ry0, ry1, range(max(x1, 0), right), colours, gap)
+                last_l = _ink_extent(image, ry0, ry1, range(min(x0, width) - 1, left - 1, -1), colours, gap)
+                right = x1 if last_r is None else min(last_r + 1 + INK_MARGIN, right)
+                left = x0 if last_l is None else max(last_l - INK_MARGIN, left)
+
+        left, right = min(left, x0), max(right, x1)
+        padded.append([[left, y0], [right, y0], [right, y1], [left, y1]])
+    return padded
 
 
 def _make_detection(bbox: Any, text: str, prob: float, decision: str) -> Dict[str, Any]:
@@ -124,9 +332,11 @@ def detect_text(
 
         # Separate low-confidence detections first
         confident_results = []
+        kept_bboxes = []  # detections left visible; redaction padding stops at them
         for (bbox, text, prob) in results:
             if prob < confidence_threshold:
                 stats['low_confidence_count'] += 1
+                kept_bboxes.append(bbox)
                 detections.append(_make_detection(bbox, text, prob, 'low_confidence'))
             else:
                 confident_results.append((bbox, text, prob))
@@ -136,6 +346,8 @@ def detect_text(
             texts = [text for (_, text, _) in confident_results]
             if texts:
                 phi_flags = ner_classifier.classify_texts(texts)
+                # Re-judge split lines as a whole ("Robinson," + "Brandy S.").
+                phi_flags = _apply_line_context(confident_results, phi_flags, ner_classifier, config)
                 for (bbox, text, prob), is_phi in zip(confident_results, phi_flags):
                     stats['ner_classified_count'] += 1
                     if is_phi:
@@ -144,6 +356,7 @@ def detect_text(
                         detections.append(_make_detection(bbox, text, prob, 'redacted'))
                     else:
                         stats['safelisted_count'] += 1
+                        kept_bboxes.append(bbox)
                         detections.append(_make_detection(bbox, text, prob, 'safelisted'))
         else:
             # --- Safelist Mode: regex-based clinical marker preservation ---
@@ -154,11 +367,19 @@ def detect_text(
                 is_safe = any(pattern.search(text) for pattern in compiled_patterns)
                 if is_safe:
                     stats['safelisted_count'] += 1
+                    kept_bboxes.append(bbox)
                     detections.append(_make_detection(bbox, text, prob, 'safelisted'))
                 else:
                     bboxes.append(bbox)
                     stats['redacted_count'] += 1
                     detections.append(_make_detection(bbox, text, prob, 'redacted'))
+
+        # Cover short tokens OCR drops beside a redacted fragment ("S." after
+        # "Brandy"). Report rows keep the OCR box; only the blanked area grows.
+        bboxes = pad_redaction_boxes(
+            bboxes, kept_bboxes, float(ocr_settings.get('redaction_padding', 0) or 0),
+            image=pixel_array,
+        )
 
     except Exception as e:
         raise PixelRedactionError(
@@ -471,6 +692,17 @@ class RedactPixelPHI(Transform):
             detection/redaction audit dict for this call.
         """
         if image.ndim == 4:
+            if image.shape[0] not in (1, 3):
+                # A (C, D, H, W) volume always has 1 or 3 channels. Anything
+                # else means the frames were stacked on the wrong axis (e.g. a
+                # raw (D, H, W, 3) cine loop): keyframe OCR would then read
+                # cross-sections instead of frames and redact nothing. Fail
+                # closed so the file is quarantined instead of passed through.
+                raise PixelRedactionError(
+                    f"Expected a (C, D, H, W) volume with 1 or 3 channels, "
+                    f"got shape {tuple(image.shape)}",
+                    transform="RedactPixelPHI",
+                )
             return self._redact_volume(image)
         return self._redact_single(image)
 

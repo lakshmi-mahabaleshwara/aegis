@@ -28,6 +28,12 @@ classifiers = [
 # Upper bounds guard the next major of the dependencies whose behavior
 # shapes Aegis output. pydicom is capped below 4 because the current save
 # path uses write_like_original, which pydicom 4 removes.
+#
+# transformers is held to 4.57.x: under transformers 5 the pinned NER model's
+# (uncased) BERT tokenizer loads with do_lower_case=False, so every
+# capitalized word becomes [UNK] and the model stops detecting names,
+# doctors and hospitals in burnt-in text. Re-validate NER recall before
+# lifting this bound.
 dependencies = [
     "monai>=1.0.0,<2",
     "torch>=1.13.0",
@@ -37,7 +43,7 @@ dependencies = [
     "numpy>=1.21.0",
     "pyyaml>=6.0",
     "pillow>=9.0.0",
-    "transformers>=4.30.0,<6",
+    "transformers>=4.57.0,<4.58",
 ]
 
 [project.optional-dependencies]

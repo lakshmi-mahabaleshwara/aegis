@@ -169,6 +169,32 @@ def _cleanup_output(data_dict: dict[str, Any], paths: RunnerPaths, rel_path: str
         os.remove(out_path)
 
 
+def _handle_low_confidence_series(
+    data_dict: dict[str, Any], paths: RunnerPaths, summary: RunSummary, label: str
+) -> bool:
+    """Send a whole image folder to review when OCR found text it could not read confidently.
+
+    Same rule as single images (:func:`_handle_single_result`): a
+    low-confidence region may be PHI the classifier never saw, so the
+    folder is not released. Every source image is copied to the review
+    folder and every output image already written is removed.
+
+    Returns:
+        True if the folder was sent to review.
+    """
+    stats_dict = data_dict.get(ck("image", ckeys.REDACTION_STATS), {}) or {}
+    if stats_dict.get("low_confidence_count", 0) <= 0:
+        return False
+    meta = data_dict.get(ck("image", ckeys.META_DICT), {}) or {}
+    source_files = [u for u in meta.get("slice_uris", []) if isinstance(u, str)]
+    _quarantine_many(source_files, paths, f"NOT PROCESSED (low-confidence text): Folder {label}")
+    for out_path in data_dict.get(ck("image", ckeys.SAVED_PATHS)) or []:
+        if isinstance(out_path, str) and os.path.exists(out_path):
+            os.remove(out_path)
+    summary.not_processed += len(source_files)
+    return True
+
+
 def _handle_error_result(data_dict: dict[str, Any], paths: RunnerPaths, summary: RunSummary, reason: str) -> bool:
     if "error" not in data_dict:
         return False
@@ -220,9 +246,10 @@ def _log_single_summary(summary: RunSummary) -> None:
 
 def _log_series_summary(summary: RunSummary) -> None:
     logger.info(
-        "Image series processing complete. Folders: %d | Images: %d | Errors: %d",
+        "Image series processing complete. Folders: %d | Images: %d | Not processed: %d | Errors: %d",
         summary.series,
         summary.slices,
+        summary.not_processed,
         summary.errors,
     )
 
@@ -250,24 +277,26 @@ def run_single(config_path: str) -> None:
     )
 
     summary = RunSummary()
-    # JPEG/PNG inputs have no DICOM tags — skip the tag-actions CSV.
-    report = reporting.GroundTruthAccumulator(config, include_tag_actions=False)
     data_list = []
     for file_path in image_files:
         rel_path = os.path.relpath(file_path, paths.input_dir)
         data_list.append({"image": file_path, "file_path": file_path, "rel_path": rel_path})
 
-    for data_dict in _run_dataloader(
-        data_list,
-        pipeline,
-        num_workers=paths.dataloader_num_workers,
-    ):
-        report.collect(data_dict)
-        if _handle_error_result(data_dict, paths, summary, "NOT PROCESSED (ERROR)"):
-            continue
-        _handle_single_result(data_dict, paths, summary, count_as_processed="processed")
+    # JPEG/PNG inputs have no DICOM tags — skip the tag-actions CSV.
+    # Reports stream to disk per file, so a crash keeps every completed row.
+    with reporting.GroundTruthAccumulator(
+        config, include_tag_actions=False, output_dir=paths.output_dir
+    ) as report:
+        for data_dict in _run_dataloader(
+            data_list,
+            pipeline,
+            num_workers=paths.dataloader_num_workers,
+        ):
+            report.collect(data_dict)
+            if _handle_error_result(data_dict, paths, summary, "NOT PROCESSED (ERROR)"):
+                continue
+            _handle_single_result(data_dict, paths, summary, count_as_processed="processed")
 
-    report.flush(paths.output_dir)
     _log_single_summary(summary)
 
 
@@ -336,46 +365,49 @@ def run_series(config_path: str) -> None:
             series_data.append({"image": folder_images, "label": label, "num_slices": len(folder_images)})
 
     summary = RunSummary()
+
     # JPEG/PNG inputs have no DICOM tags — skip the tag-actions CSV.
-    report = reporting.GroundTruthAccumulator(config, include_tag_actions=False)
+    # Reports stream to disk per file/folder, so a crash keeps every completed row.
+    with reporting.GroundTruthAccumulator(
+        config, include_tag_actions=False, output_dir=paths.output_dir
+    ) as report:
+        if singletons_data:
+            for data_dict in _run_dataloader(
+                singletons_data,
+                pipeline_single,
+                num_workers=paths.dataloader_num_workers,
+            ):
+                report.collect(data_dict)
+                if _handle_error_result(data_dict, paths, summary, "NOT PROCESSED (ERROR)"):
+                    continue
+                _handle_single_result(data_dict, paths, summary, count_as_processed="slices")
 
-    if singletons_data:
-        for data_dict in _run_dataloader(
-            singletons_data,
-            pipeline_single,
-            num_workers=paths.dataloader_num_workers,
-        ):
-            report.collect(data_dict)
-            if _handle_error_result(data_dict, paths, summary, "NOT PROCESSED (ERROR)"):
-                continue
-            _handle_single_result(data_dict, paths, summary, count_as_processed="slices")
+        if series_data:
+            for data_dict in _run_dataloader(
+                series_data,
+                pipeline,
+                num_workers=paths.dataloader_num_workers,
+            ):
+                report.collect(data_dict)
+                label = data_dict.get("label", "unknown")
+                if _handle_error_result(data_dict, paths, summary, f"NOT PROCESSED (ERROR): Series {label}"):
+                    continue
+                if _handle_low_confidence_series(data_dict, paths, summary, label):
+                    continue
 
-    if series_data:
-        for data_dict in _run_dataloader(
-            series_data,
-            pipeline,
-            num_workers=paths.dataloader_num_workers,
-        ):
-            report.collect(data_dict)
-            label = data_dict.get("label", "unknown")
-            if _handle_error_result(data_dict, paths, summary, f"NOT PROCESSED (ERROR): Series {label}"):
-                continue
+                stats_dict = data_dict.get(ck("image", ckeys.REDACTION_STATS), {})
+                strategy = stats_dict.get("volume_strategy", "unknown")
+                num_slices = data_dict.get("num_slices", 0)
 
-            stats_dict = data_dict.get(ck("image", ckeys.REDACTION_STATS), {})
-            strategy = stats_dict.get("volume_strategy", "unknown")
-            num_slices = data_dict.get("num_slices", 0)
+                logger.info(
+                    "Folder %s complete: strategy=%s, redacted=%d",
+                    label,
+                    strategy,
+                    stats_dict.get("redacted_count", 0),
+                )
 
-            logger.info(
-                "Folder %s complete: strategy=%s, redacted=%d",
-                label,
-                strategy,
-                stats_dict.get("redacted_count", 0),
-            )
-
-            summary.series += 1
-            summary.slices += num_slices
-
-    report.flush(paths.output_dir)
+                summary.series += 1
+                summary.slices += num_slices
 
     _log_series_summary(summary)
 

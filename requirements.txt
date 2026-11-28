@@ -11,5 +11,7 @@ opencv-python
 numpy
 pillow
 pyyaml
-transformers
+# transformers must stay on 4.57.x — see the note in pyproject.toml
+# (transformers 5 silently breaks NER name detection).
+transformers>=4.57.0,<4.58
 mcp[cli]

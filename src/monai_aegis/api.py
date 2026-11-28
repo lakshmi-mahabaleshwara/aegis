@@ -188,7 +188,8 @@ def deidentify(
     resolved_overlay = resolve_overlay_path(overlay_path)
 
     has_dicom = any(kind == "dicom" for _path, kind in targets)
-    accumulator = reporting.GroundTruthAccumulator(config, include_tag_actions=has_dicom)
+    # output_dir → report rows stream to disk per file (crash-safe).
+    accumulator = reporting.GroundTruthAccumulator(config, include_tag_actions=has_dicom, output_dir=str(out_dir))
 
     pipelines: Dict[str, Any] = {}
     entries: List[Dict[str, Any]] = []

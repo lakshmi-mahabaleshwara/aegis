@@ -9,7 +9,10 @@ modes, selected from the cached-dataset keys and ``is_multiframe``:
 Mode                Reads                           Writes
 ==================  ==============================  ==================================
 single              ``{key}_dicom_dataset``         ``{key}_scrubbed_ds``,
-                    (or ``dcmread`` fallback)       ``{key}_tag_actions``
+                    (or ``dcmread`` fallback);      ``{key}_tag_actions``
+                    ``(C, H, W)`` or, for a
+                    multi-frame file,
+                    ``(C, D, H, W)``
 series              ``{key}_dicom_datasets`` list   ``{key}_scrubbed_datasets``,
                                                     ``{key}_tag_actions_per_slice``
 multi-frame         ``{key}_dicom_datasets[0]``     ``{key}_scrubbed_ds``,
@@ -173,8 +176,14 @@ class ScrubDicomMetadatad(MapTransform):
         key: Hashable,
         fpath: str,
     ) -> Dict[Hashable, Any]:
-        """Scrub one dataset: ``(C, H, W)`` tensor in, ``{key}_scrubbed_ds`` + ``{key}_tag_actions`` out."""
+        """Scrub one dataset: ``{key}_scrubbed_ds`` + ``{key}_tag_actions`` out.
+
+        The tensor is ``(C, H, W)`` for a single frame or ``(C, D, H, W)``
+        for a multi-frame file loaded by ``LoadDicomRaw`` (e.g. an
+        ultrasound cine loop); either way it comes back in the same layout.
+        """
         pix = _as_numpy(d[key])
+        is_volume = pix.ndim == VOLUME_RANK
 
         # channel-first -> DICOM layout
         if pix.ndim == 3:
@@ -182,6 +191,16 @@ class ScrubDicomMetadatad(MapTransform):
                 pix = pix.squeeze(0)
             elif pix.shape[0] == CHANNELS_RGB:
                 pix = np.transpose(pix, (1, 2, 0))
+        elif is_volume:
+            if pix.shape[0] == CHANNELS_MONO:
+                pix = pix.squeeze(0)                        # (D, H, W)
+            elif pix.shape[0] == CHANNELS_RGB:
+                pix = np.transpose(pix, (1, 2, 3, 0))       # (D, H, W, 3)
+            else:
+                raise MetadataScrubError(
+                    f"Unsupported channel layout for multi-frame scrub: {pix.shape}",
+                    transform=DICT_TRANSFORM_NAME,
+                )
 
         ds_orig = d.get(ck(key, ckeys.DICOM_DATASET))
         if ds_orig is None:
@@ -201,7 +220,12 @@ class ScrubDicomMetadatad(MapTransform):
         # DICOM layout -> channel-first
         if hasattr(scrubbed_ds, 'pixel_array'):
             scrubbed_pix = scrubbed_ds.pixel_array.astype(np.float32)
-            if scrubbed_pix.ndim == 2:
+            if is_volume:
+                if scrubbed_pix.ndim == 3:                  # (D, H, W)
+                    scrubbed_pix = scrubbed_pix[np.newaxis, ...]
+                elif scrubbed_pix.ndim == 4 and scrubbed_pix.shape[-1] == CHANNELS_RGB:
+                    scrubbed_pix = np.transpose(scrubbed_pix, (3, 0, 1, 2))
+            elif scrubbed_pix.ndim == 2:
                 scrubbed_pix = scrubbed_pix[np.newaxis, ...]
             elif scrubbed_pix.ndim == 3 and scrubbed_pix.shape[-1] == CHANNELS_RGB:
                 scrubbed_pix = np.transpose(scrubbed_pix, (2, 0, 1))
